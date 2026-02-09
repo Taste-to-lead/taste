@@ -41,6 +41,12 @@ A full-stack real estate application with two distinct experiences:
 - `client/src/pages/listings.tsx` - Property CRUD grid
 - `client/src/components/app-sidebar.tsx` - Navigation sidebar
 
+### Consumer Card Features (Phase 3)
+- **Insta-Style Galleries**: Each property card supports multiple images (3 per seeded property). Invisible tap zones (left 30%, right 30%) cycle photos. Instagram-story progress bars at top show active photo. Tap vs drag gesture separation via timing threshold (250ms) and movement (10px).
+- **Vibe Match Algorithm**: Client-side `computeMatchScore()` compares user onboarding filters against property data. `MatchBadge` renders color-coded badge: green pulse 90%+ ("Dream Home"), amber 70-89% ("Great Match"), grey <70% ("Explore"). Score boosted for under-budget pricing and exact bedroom match.
+- **Glassmorphism Specs**: Bottom card overlay uses `backdrop-blur-md bg-white/10 border-white/10` for frosted glass look. Property details readable over any photo.
+- **Haptics**: `navigator.vibrate` triggered on right swipe and photo tap (if device supports).
+
 ## User Preferences
 - Dark mode by default
 - Gold/amber primary accent color
