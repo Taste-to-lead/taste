@@ -69,6 +69,13 @@ A full-stack real estate application with two distinct experiences:
 - Dropdown feed with priority-coded borders (red=critical, gold=high)
 - Mark read/mark all read functionality with 10s polling refresh
 
+### Production Deployment (Phase 6)
+- **PWA**: manifest.json with "Taste to Lead" name, custom icons (192/512), standalone display, portrait orientation
+- **Service Worker**: Caches images (cache-first), Google Fonts (cache-first), pages (network-first); skips /api/ requests
+- **Security**: Helmet middleware for headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.); CSP disabled for Vite compatibility
+- **Database**: PostgreSQL via Replit's built-in Neon-backed DB (persistent by default, no SQLite)
+- **Port**: Uses process.env.PORT with fallback to 5000
+
 ## User Preferences
 - Dark mode by default
 - Gold/amber primary accent color
