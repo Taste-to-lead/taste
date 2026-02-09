@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { motion, useMotionValue, useTransform, animate, PanInfo } from "framer-motion";
-import { MapPin, Bed, Bath, Ruler, ArrowLeft, Heart, X as XIcon, SlidersHorizontal } from "lucide-react";
+import { motion, useMotionValue, useTransform, animate, PanInfo, AnimatePresence } from "framer-motion";
+import { MapPin, Bed, Bath, Ruler, ArrowLeft, Heart, X as XIcon, SlidersHorizontal, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +23,7 @@ function OnboardingWizard({ onComplete }: { onComplete: (data: OnboardingData) =
   const [data, setData] = useState<OnboardingData>({
     location: "",
     budgetMin: 100000,
-    budgetMax: 2000000,
+    budgetMax: 10000000,
     bedrooms: "2",
     vibe: "modern",
   });
@@ -206,14 +206,100 @@ function OnboardingWizard({ onComplete }: { onComplete: (data: OnboardingData) =
   );
 }
 
+function triggerHaptic(pattern: number | number[] = 10) {
+  try {
+    if (navigator.vibrate) navigator.vibrate(pattern);
+  } catch {}
+}
+
+function computeMatchScore(
+  property: Property,
+  filters: OnboardingData | null,
+): number {
+  if (!filters) return 0;
+  let score = 0;
+  let maxScore = 0;
+
+  maxScore += 30;
+  if (filters.vibe && property.vibe === filters.vibe) score += 30;
+
+  maxScore += 30;
+  const bedroomTarget = filters.bedrooms === "Studio" ? 0 : parseInt(filters.bedrooms.replace("+", ""), 10);
+  if (property.bedrooms === bedroomTarget) score += 30;
+  else if (Math.abs(property.bedrooms - bedroomTarget) === 1) score += 15;
+
+  maxScore += 30;
+  if (property.price >= (filters.budgetMin || 0) && property.price <= (filters.budgetMax || Infinity)) {
+    score += 30;
+  } else if (property.price < (filters.budgetMin || 0)) {
+    const diff = ((filters.budgetMin || 0) - property.price) / (filters.budgetMin || 1);
+    if (diff < 0.2) score += 15;
+  }
+
+  if (filters.budgetMax && property.price < filters.budgetMax * 0.9) {
+    score += 5;
+    maxScore += 5;
+  } else {
+    maxScore += 5;
+  }
+
+  if (property.bedrooms === bedroomTarget) {
+    score += 5;
+    maxScore += 5;
+  } else {
+    maxScore += 5;
+  }
+
+  return Math.round((score / maxScore) * 100);
+}
+
+function MatchBadge({ score }: { score: number }) {
+  const tier = score >= 90 ? "dream" : score >= 70 ? "gold" : "ghost";
+  const colors = {
+    dream: "from-emerald-400 to-green-500 shadow-emerald-500/40",
+    gold: "from-amber-400 to-yellow-500 shadow-amber-500/40",
+    ghost: "from-zinc-400 to-zinc-500 shadow-zinc-500/20",
+  };
+  const labels = { dream: "Dream Home", gold: "Great Match", ghost: "Explore" };
+
+  return (
+    <motion.div
+      initial={{ scale: 0, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ delay: 0.3, type: "spring", stiffness: 400, damping: 20 }}
+      className="absolute top-12 right-3 z-20"
+      data-testid={`badge-match-${tier}`}
+    >
+      <div
+        className={`relative bg-gradient-to-r ${colors[tier]} rounded-md px-2.5 py-1.5 shadow-lg`}
+      >
+        {tier === "dream" && (
+          <motion.div
+            className="absolute inset-0 rounded-md bg-gradient-to-r from-emerald-400 to-green-500 opacity-60"
+            animate={{ opacity: [0.4, 0.8, 0.4] }}
+            transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+          />
+        )}
+        <div className="relative flex items-center gap-1.5">
+          <Sparkles className="w-3 h-3 text-white" />
+          <span className="text-white text-xs font-bold">{score}%</span>
+        </div>
+        <p className="relative text-white/80 text-[10px] font-medium mt-0.5 leading-none">{labels[tier]}</p>
+      </div>
+    </motion.div>
+  );
+}
+
 function SwipeCard({
   property,
   onSwipe,
   isTop,
+  filters,
 }: {
   property: Property;
   onSwipe: (dir: "left" | "right") => void;
   isTop: boolean;
+  filters: OnboardingData | null;
 }) {
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-300, 0, 300], [-15, 0, 15]);
@@ -221,11 +307,32 @@ function SwipeCard({
   const likeOpacity = useTransform(x, [0, 100], [0, 1]);
   const passOpacity = useTransform(x, [-100, 0], [1, 0]);
 
+  const images = (property.images && property.images.length > 0)
+    ? property.images
+    : ["/images/property-1.png"];
+  const [photoIndex, setPhotoIndex] = useState(0);
+  const isDragging = useRef(false);
+  const dragStartTime = useRef(0);
+  const dragStartPos = useRef({ x: 0, y: 0 });
+
+  const matchScore = computeMatchScore(property, filters);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    dragStartTime.current = Date.now();
+    dragStartPos.current = { x: e.clientX, y: e.clientY };
+    isDragging.current = false;
+  }, []);
+
+  const handleDragStart = useCallback(() => {
+    isDragging.current = true;
+  }, []);
+
   const handleDragEnd = useCallback((_: any, info: PanInfo) => {
     const threshold = 100;
     if (Math.abs(info.offset.x) > threshold) {
       const dir = info.offset.x > 0 ? "right" : "left";
       const flyTo = info.offset.x > 0 ? 600 : -600;
+      if (dir === "right") triggerHaptic([15, 30, 15]);
       animate(x, flyTo, {
         type: "spring",
         stiffness: 300,
@@ -235,9 +342,29 @@ function SwipeCard({
     } else {
       animate(x, 0, { type: "spring", stiffness: 500, damping: 30 });
     }
+    setTimeout(() => { isDragging.current = false; }, 50);
   }, [onSwipe, x]);
 
-  const imgSrc = property.images?.[0] || "/images/property-1.png";
+  const handleTap = useCallback((e: React.MouseEvent) => {
+    if (isDragging.current) return;
+    const elapsed = Date.now() - dragStartTime.current;
+    const dx = Math.abs(e.clientX - dragStartPos.current.x);
+    const dy = Math.abs(e.clientY - dragStartPos.current.y);
+    if (elapsed > 250 || dx > 10 || dy > 10) return;
+
+    if (images.length <= 1) return;
+
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const relativeX = (e.clientX - rect.left) / rect.width;
+
+    if (relativeX < 0.3) {
+      setPhotoIndex(prev => (prev > 0 ? prev - 1 : images.length - 1));
+      triggerHaptic(5);
+    } else if (relativeX > 0.7) {
+      setPhotoIndex(prev => (prev < images.length - 1 ? prev + 1 : 0));
+      triggerHaptic(5);
+    }
+  }, [images.length]);
 
   return (
     <motion.div
@@ -252,29 +379,59 @@ function SwipeCard({
       drag={isTop ? "x" : false}
       dragConstraints={{ left: 0, right: 0, top: 0, bottom: 0 }}
       dragElastic={0.7}
+      onDragStart={isTop ? handleDragStart : undefined}
       onDragEnd={isTop ? handleDragEnd : undefined}
       data-testid={`card-swipe-${property.id}`}
     >
-      <div className="w-full h-full rounded-2xl overflow-hidden relative shadow-2xl">
-        <img
-          src={imgSrc}
-          alt={property.title}
-          className="absolute inset-0 w-full h-full object-cover"
-          draggable={false}
-        />
+      <div
+        className="w-full h-full rounded-2xl overflow-hidden relative shadow-2xl"
+        onPointerDown={isTop ? handlePointerDown : undefined}
+        onClick={isTop ? handleTap : undefined}
+      >
+        <AnimatePresence mode="wait">
+          <motion.img
+            key={photoIndex}
+            src={images[photoIndex]}
+            alt={`${property.title} photo ${photoIndex + 1}`}
+            className="absolute inset-0 w-full h-full object-cover"
+            draggable={false}
+            initial={{ opacity: 0.6 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0.6 }}
+            transition={{ duration: 0.2 }}
+            data-testid={`img-swipe-photo-${property.id}`}
+          />
+        </AnimatePresence>
 
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+        {images.length > 1 && (
+          <div className="absolute top-0 left-0 right-0 z-20 flex gap-1 px-3 pt-2" data-testid={`gallery-progress-${property.id}`}>
+            {images.map((_, i) => (
+              <div key={i} className="flex-1 h-[3px] rounded-full bg-white/25 overflow-hidden">
+                <motion.div
+                  className="h-full rounded-full bg-white"
+                  initial={false}
+                  animate={{ width: i === photoIndex ? "100%" : i < photoIndex ? "100%" : "0%" }}
+                  transition={{ duration: 0.3 }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {isTop && <MatchBadge score={matchScore} />}
 
         {isTop && (
           <>
             <motion.div
-              className="absolute top-6 left-6 px-4 py-2 rounded-md border-2 border-red-500 text-red-500 font-bold text-xl -rotate-12"
+              className="absolute top-14 left-4 px-4 py-2 rounded-md border-2 border-red-500 text-red-500 font-bold text-xl -rotate-12"
               style={{ opacity: passOpacity }}
             >
               PASS
             </motion.div>
             <motion.div
-              className="absolute top-6 right-6 px-4 py-2 rounded-md border-2 border-green-500 text-green-500 font-bold text-xl rotate-12"
+              className="absolute top-14 left-4 px-4 py-2 rounded-md border-2 border-green-500 text-green-500 font-bold text-xl rotate-12"
               style={{ opacity: likeOpacity }}
             >
               LIKE
@@ -282,14 +439,14 @@ function SwipeCard({
           </>
         )}
 
-        <div className="absolute bottom-0 left-0 right-0 p-5 space-y-2">
-          <h2 className="text-2xl font-bold text-white" data-testid={`text-swipe-title-${property.id}`}>{property.title}</h2>
-          <p className="text-xl font-bold text-primary">${property.price.toLocaleString()}</p>
-          <div className="flex items-center gap-1.5 text-white/70 text-sm">
+        <div className="absolute bottom-0 left-0 right-0 m-3 rounded-xl backdrop-blur-md bg-white/10 border border-white/10 p-4 space-y-2" data-testid={`glass-specs-${property.id}`}>
+          <h2 className="text-xl font-bold text-white" data-testid={`text-swipe-title-${property.id}`}>{property.title}</h2>
+          <p className="text-lg font-bold text-primary">${property.price.toLocaleString()}</p>
+          <div className="flex items-center gap-1.5 text-white/80 text-sm">
             <MapPin className="w-3.5 h-3.5" />
             <span>{property.location}</span>
           </div>
-          <div className="flex items-center gap-4 text-white/60 text-sm">
+          <div className="flex items-center gap-4 text-white/70 text-sm flex-wrap">
             <div className="flex items-center gap-1">
               <Bed className="w-3.5 h-3.5" />
               <span>{property.bedrooms} beds</span>
@@ -304,6 +461,13 @@ function SwipeCard({
             </div>
           </div>
         </div>
+
+        {isTop && images.length > 1 && (
+          <>
+            <div className="absolute left-0 top-0 bottom-0 w-[30%] z-10" data-testid={`tap-zone-prev-${property.id}`} />
+            <div className="absolute right-0 top-0 bottom-0 w-[30%] z-10" data-testid={`tap-zone-next-${property.id}`} />
+          </>
+        )}
       </div>
     </motion.div>
   );
@@ -468,6 +632,7 @@ export default function Consumer() {
     setSwipedIds(prev => new Set(prev).add(property.id));
 
     if (dir === "right") {
+      triggerHaptic([15, 30, 15]);
       setMatchProperty(property);
     }
   };
@@ -529,6 +694,7 @@ export default function Consumer() {
                 property={property}
                 onSwipe={handleSwipe}
                 isTop={i === (Math.min(properties.length, 2) - 1)}
+                filters={filters}
               />
             ))}
           </div>
