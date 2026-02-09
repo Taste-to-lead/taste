@@ -1,10 +1,22 @@
 import { db } from "./db";
-import { properties } from "@shared/schema";
+import { properties, agents } from "@shared/schema";
 import { sql } from "drizzle-orm";
+import bcrypt from "bcryptjs";
 
 export async function seedDatabase() {
+  const existingAgents = await db.select({ count: sql<number>`count(*)` }).from(agents);
+  if (Number(existingAgents[0].count) === 0) {
+    const hash = await bcrypt.hash("agent123", 10);
+    await db.insert(agents).values({
+      email: "agent@taste.com",
+      passwordHash: hash,
+      name: "Premium Agent",
+    });
+    console.log("Default agent created: agent@taste.com / agent123");
+  }
+
   const existing = await db.select({ count: sql<number>`count(*)` }).from(properties);
-  if (existing[0].count > 0) return;
+  if (Number(existing[0].count) > 0) return;
 
   const seedProperties = [
     {

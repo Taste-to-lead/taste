@@ -1,13 +1,62 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertPropertySchema, insertLeadSchema, swipeSchema } from "@shared/schema";
+import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema } from "@shared/schema";
 import { sendEmail, buildMatchEmailHtml } from "./notificationService";
+import bcrypt from "bcryptjs";
+
+function requireAgent(req: Request, res: Response, next: NextFunction) {
+  if (!req.session?.agentId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  next();
+}
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const parsed = loginSchema.parse(req.body);
+      const agent = await storage.getAgentByEmail(parsed.email);
+      if (!agent) {
+        return res.status(401).json({ message: "Invalid email or password" });
+      }
+      const valid = await bcrypt.compare(parsed.password, agent.passwordHash);
+      if (!valid) {
+        return res.status(401).json({ message: "Invalid email or password" });
+      }
+      req.session.agentId = agent.id;
+      req.session.agentEmail = agent.email;
+      req.session.agentName = agent.name;
+      res.json({ id: agent.id, email: agent.email, name: agent.name });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ message: "Logout failed" });
+      }
+      res.clearCookie("connect.sid");
+      res.json({ success: true });
+    });
+  });
+
+  app.get("/api/auth/me", (req, res) => {
+    if (!req.session?.agentId) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    res.json({
+      id: req.session.agentId,
+      email: req.session.agentEmail,
+      name: req.session.agentName,
+    });
+  });
 
   app.get("/api/properties", async (req, res) => {
     try {
@@ -40,7 +89,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/properties", async (req, res) => {
+  app.post("/api/properties", requireAgent, async (req, res) => {
     try {
       const parsed = insertPropertySchema.parse(req.body);
       const property = await storage.createProperty(parsed);
@@ -50,7 +99,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/properties/:id", async (req, res) => {
+  app.patch("/api/properties/:id", requireAgent, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const existing = await storage.getProperty(id);
@@ -64,7 +113,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/properties/:id", async (req, res) => {
+  app.delete("/api/properties/:id", requireAgent, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const deleted = await storage.deleteProperty(id);
@@ -91,7 +140,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/leads", async (req, res) => {
+  app.get("/api/leads", requireAgent, async (req, res) => {
     try {
       const leads = await storage.getLeads();
       res.json(leads);
@@ -147,8 +196,8 @@ export async function registerRoutes(
             price: property.price,
           });
           sendEmail(
-            "agent@luxeestates.com",
-            `HOT LEAD: ${userName} matched ${property.title}`,
+            "agent@taste.com",
+            `Taste | Hot Lead Alert: ${userName} matched ${property.title}`,
             emailHtml
           );
         }
@@ -160,7 +209,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/notifications", async (req, res) => {
+  app.get("/api/notifications", requireAgent, async (req, res) => {
     try {
       const recipientId = (req.query.recipientId as string) || "agent-1";
       const notifications = await storage.getNotifications(recipientId);
@@ -170,7 +219,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/notifications/count", async (req, res) => {
+  app.get("/api/notifications/count", requireAgent, async (req, res) => {
     try {
       const recipientId = (req.query.recipientId as string) || "agent-1";
       const count = await storage.getUnreadNotificationCount(recipientId);
@@ -180,7 +229,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/notifications/:id/read", async (req, res) => {
+  app.patch("/api/notifications/:id/read", requireAgent, async (req, res) => {
     try {
       await storage.markNotificationRead(parseInt(req.params.id));
       res.json({ success: true });
@@ -189,7 +238,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/notifications/read-all", async (req, res) => {
+  app.patch("/api/notifications/read-all", requireAgent, async (req, res) => {
     try {
       const recipientId = (req.body.recipientId as string) || "agent-1";
       await storage.markAllNotificationsRead(recipientId);

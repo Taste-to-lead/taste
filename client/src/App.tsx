@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, Redirect } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -6,11 +6,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { NotificationBell } from "@/components/notification-bell";
+import { useAuth } from "@/hooks/use-auth";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import Listings from "@/pages/listings";
 import Settings from "@/pages/settings";
 import Consumer from "@/pages/consumer";
+import Login from "@/pages/login";
 
 function AgentLayout({ children }: { children: React.ReactNode }) {
   const style = {
@@ -36,19 +38,50 @@ function AgentLayout({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Redirect to="/login" />;
+  }
+
+  return <>{children}</>;
+}
+
 function Router() {
   return (
     <Switch>
-      <Route path="/">
-        <AgentLayout><Dashboard /></AgentLayout>
+      <Route path="/" component={Consumer} />
+      <Route path="/login" component={Login} />
+      <Route path="/agent">
+        <ProtectedRoute>
+          <AgentLayout><Dashboard /></AgentLayout>
+        </ProtectedRoute>
       </Route>
-      <Route path="/listings">
-        <AgentLayout><Listings /></AgentLayout>
+      <Route path="/agent/listings">
+        <ProtectedRoute>
+          <AgentLayout><Listings /></AgentLayout>
+        </ProtectedRoute>
       </Route>
-      <Route path="/settings">
-        <AgentLayout><Settings /></AgentLayout>
+      <Route path="/agent/settings">
+        <ProtectedRoute>
+          <AgentLayout><Settings /></AgentLayout>
+        </ProtectedRoute>
       </Route>
-      <Route path="/discover" component={Consumer} />
+      <Route path="/discover">
+        <Redirect to="/" />
+      </Route>
+      <Route path="/dashboard">
+        <Redirect to="/agent" />
+      </Route>
       <Route component={NotFound} />
     </Switch>
   );

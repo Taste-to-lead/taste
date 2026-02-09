@@ -21,11 +21,11 @@ export default function Settings() {
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label htmlFor="name">Full Name</Label>
-            <Input id="name" defaultValue="James Morgan" data-testid="input-fullname" />
+            <Input id="name" defaultValue="Premium Agent" data-testid="input-fullname" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="email">Email</Label>
-            <Input id="email" type="email" defaultValue="james@luxuryestates.com" data-testid="input-email" />
+            <Input id="email" type="email" defaultValue="agent@taste.com" data-testid="input-email" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="phone">Phone</Label>

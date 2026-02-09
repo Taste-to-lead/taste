@@ -1,4 +1,4 @@
-import { properties, leads, notifications, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification } from "@shared/schema";
+import { properties, leads, notifications, agents, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, gte, lte, ilike, desc, sql } from "drizzle-orm";
 
@@ -22,6 +22,9 @@ export interface IStorage {
   createNotification(data: InsertNotification): Promise<Notification>;
   markNotificationRead(id: number): Promise<void>;
   markAllNotificationsRead(recipientId: string): Promise<void>;
+  getAgentByEmail(email: string): Promise<Agent | undefined>;
+  createAgent(data: InsertAgent): Promise<Agent>;
+  getAgent(id: number): Promise<Agent | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -118,6 +121,21 @@ export class DatabaseStorage implements IStorage {
     await db.update(notifications)
       .set({ readStatus: true })
       .where(eq(notifications.recipientId, recipientId));
+  }
+
+  async getAgentByEmail(email: string): Promise<Agent | undefined> {
+    const [agent] = await db.select().from(agents).where(eq(agents.email, email));
+    return agent;
+  }
+
+  async createAgent(data: InsertAgent): Promise<Agent> {
+    const [agent] = await db.insert(agents).values(data).returning();
+    return agent;
+  }
+
+  async getAgent(id: number): Promise<Agent | undefined> {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, id));
+    return agent;
   }
 }
 

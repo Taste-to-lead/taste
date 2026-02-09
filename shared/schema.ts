@@ -59,6 +59,25 @@ export const insertNotificationSchema = createInsertSchema(notifications).omit({
 export type InsertNotification = z.infer<typeof insertNotificationSchema>;
 export type Notification = typeof notifications.$inferSelect;
 
+export const agents = pgTable("agents", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name").notNull().default("Premium Agent"),
+});
+
+export const insertAgentSchema = createInsertSchema(agents).omit({
+  id: true,
+});
+
+export type InsertAgent = z.infer<typeof insertAgentSchema>;
+export type Agent = typeof agents.$inferSelect;
+
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
 export const swipeSchema = z.object({
   propertyId: z.number(),
   direction: z.enum(["left", "right"]),
