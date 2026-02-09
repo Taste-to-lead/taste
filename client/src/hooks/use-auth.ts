@@ -5,6 +5,10 @@ type AuthUser = {
   id: number;
   email: string;
   name: string;
+  role: string;
+  organizationId: number | null;
+  organizationName?: string;
+  isSuperAdmin: boolean;
 } | null;
 
 export function useAuth() {
@@ -19,5 +23,7 @@ export function useAuth() {
     user: user ?? null,
     isLoading,
     isAuthenticated: !!user,
+    isSuperAdmin: user?.isSuperAdmin ?? false,
+    organizationName: user?.organizationName ?? null,
   };
 }

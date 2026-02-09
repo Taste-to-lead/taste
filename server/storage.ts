@@ -1,4 +1,4 @@
-import { properties, leads, notifications, agents, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent } from "@shared/schema";
+import { properties, leads, notifications, agents, organizations, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent, type Organization, type InsertOrganization } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, gte, lte, ilike, desc, sql } from "drizzle-orm";
 
@@ -10,13 +10,14 @@ export interface IStorage {
     bedrooms?: number;
     vibe?: string;
     status?: string;
+    organizationId?: number;
   }): Promise<Property[]>;
   getProperty(id: number): Promise<Property | undefined>;
   createProperty(data: InsertProperty): Promise<Property>;
   updateProperty(id: number, data: Partial<InsertProperty>): Promise<Property | undefined>;
   deleteProperty(id: number): Promise<boolean>;
   createLead(data: InsertLead): Promise<Lead>;
-  getLeads(): Promise<Lead[]>;
+  getLeads(organizationId?: number): Promise<Lead[]>;
   getNotifications(recipientId: string): Promise<Notification[]>;
   getUnreadNotificationCount(recipientId: string): Promise<number>;
   createNotification(data: InsertNotification): Promise<Notification>;
@@ -25,6 +26,10 @@ export interface IStorage {
   getAgentByEmail(email: string): Promise<Agent | undefined>;
   createAgent(data: InsertAgent): Promise<Agent>;
   getAgent(id: number): Promise<Agent | undefined>;
+  createOrganization(data: InsertOrganization): Promise<Organization>;
+  getOrganization(id: number): Promise<Organization | undefined>;
+  getOrganizationByInviteCode(code: string): Promise<Organization | undefined>;
+  getAllOrganizations(): Promise<Organization[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -35,6 +40,7 @@ export class DatabaseStorage implements IStorage {
     bedrooms?: number;
     vibe?: string;
     status?: string;
+    organizationId?: number;
   }): Promise<Property[]> {
     const conditions = [];
 
@@ -55,6 +61,9 @@ export class DatabaseStorage implements IStorage {
     }
     if (filters?.status) {
       conditions.push(eq(properties.status, filters.status));
+    }
+    if (filters?.organizationId) {
+      conditions.push(eq(properties.organizationId, filters.organizationId));
     }
 
     if (conditions.length > 0) {
@@ -88,7 +97,18 @@ export class DatabaseStorage implements IStorage {
     return lead;
   }
 
-  async getLeads(): Promise<Lead[]> {
+  async getLeads(organizationId?: number): Promise<Lead[]> {
+    if (organizationId) {
+      return db.select({
+        id: leads.id,
+        propertyId: leads.propertyId,
+        name: leads.name,
+        phone: leads.phone,
+        createdAt: leads.createdAt,
+      }).from(leads)
+        .innerJoin(properties, eq(leads.propertyId, properties.id))
+        .where(eq(properties.organizationId, organizationId));
+    }
     return db.select().from(leads);
   }
 
@@ -136,6 +156,25 @@ export class DatabaseStorage implements IStorage {
   async getAgent(id: number): Promise<Agent | undefined> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, id));
     return agent;
+  }
+
+  async createOrganization(data: InsertOrganization): Promise<Organization> {
+    const [org] = await db.insert(organizations).values(data).returning();
+    return org;
+  }
+
+  async getOrganization(id: number): Promise<Organization | undefined> {
+    const [org] = await db.select().from(organizations).where(eq(organizations.id, id));
+    return org;
+  }
+
+  async getOrganizationByInviteCode(code: string): Promise<Organization | undefined> {
+    const [org] = await db.select().from(organizations).where(eq(organizations.inviteCode, code));
+    return org;
+  }
+
+  async getAllOrganizations(): Promise<Organization[]> {
+    return db.select().from(organizations);
   }
 }
 

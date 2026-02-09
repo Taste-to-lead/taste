@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Settings, Sparkles, LogOut } from "lucide-react";
+import { LayoutDashboard, Building2, Settings, Sparkles, LogOut, Shield } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -77,8 +77,13 @@ export function AppSidebar() {
             {user?.name?.charAt(0) || "A"}
           </div>
           <div className="overflow-hidden flex-1">
-            <p className="text-sm font-medium truncate" data-testid="text-agent-name">{user?.name || "Premium Agent"}</p>
-            <p className="text-xs text-muted-foreground truncate">{user?.email || ""}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm font-medium truncate" data-testid="text-agent-name">{user?.name || "Premium Agent"}</p>
+              {user?.isSuperAdmin && <Shield className="w-3.5 h-3.5 text-primary shrink-0" />}
+            </div>
+            <p className="text-xs text-muted-foreground truncate" data-testid="text-org-name">
+              {user?.isSuperAdmin ? "Super Admin" : (user as any)?.organizationName || "Freelance"}
+            </p>
           </div>
         </div>
         <Button

@@ -1,7 +1,7 @@
-# Taste - Real Estate Discovery & Agent Console
+# Taste - Real Estate Discovery & Agent Console (Multi-Tenant SaaS)
 
 ## Overview
-A full-stack real estate application with two distinct experiences:
+A full-stack multi-tenant real estate SaaS platform with two distinct experiences:
 1. **Agent Console** (Command Center) - Property CRUD, stats, lead management, real-time notification feed
 2. **Consumer App** (Taste) - Tinder-style property swipe discovery with onboarding wizard
 
@@ -13,9 +13,21 @@ A full-stack real estate application with two distinct experiences:
 
 ## Project Architecture
 
+### Multi-Tenancy (Organization Silos)
+- **organizations** table: id, name, subscriptionTier, logoUrl, inviteCode
+- All agents belong to an organization (via organizationId)
+- All properties belong to an organization (via organizationId)
+- GET /api/properties filters by logged-in agent's organizationId (silo)
+- POST /api/properties auto-tags with agent's organizationId
+- PATCH/DELETE /api/properties checks org ownership (403 if cross-org)
+- Leads filtered by org via property join
+- **Super Admin** (vinnysladeb@gmail.com): bypasses all org filters, sees all data
+- **Signup flow**: New agents default to "Public / Freelance" org; invite code joins specific org
+- **Seeded orgs**: "Public / Freelance" (free), "Taste Realty Group" (pro, invite: TASTE-PRO-2025)
+
 ### Routes (Frontend)
 - `/` - Consumer swipe app (public, no login needed)
-- `/login` - Agent login page
+- `/login` - Agent login/signup page (tabbed)
 - `/agent` - Agent Dashboard (protected, requires login)
 - `/agent/listings` - Property CRUD grid (protected)
 - `/agent/settings` - Agent preferences (protected)
@@ -25,41 +37,46 @@ A full-stack real estate application with two distinct experiences:
 ### RBAC Security
 - **Public routes**: GET `/api/properties`, GET `/api/properties/:id`, POST `/api/leads`, POST `/api/swipe`
 - **Protected routes**: All POST/PATCH/DELETE on properties, GET leads, all notification endpoints
-- **Auth endpoints**: POST `/api/auth/login`, POST `/api/auth/logout`, GET `/api/auth/me`
-- **Default agent**: agent@taste.com / agent123
+- **Auth endpoints**: POST `/api/auth/login`, POST `/api/auth/signup`, POST `/api/auth/logout`, GET `/api/auth/me`
+- **Super Admin endpoint**: GET `/api/organizations` (super admin only)
+- **Default agent**: agent@taste.com / agent123 (Taste Realty Group)
+- **Super admin**: vinnysladeb@gmail.com / admin123
 
 ### API Endpoints
-- `GET /api/properties` - List with filters (public)
+- `GET /api/properties` - List with filters + org silo (public shows all, agent sees own org)
 - `GET /api/properties/:id` - Single property (public)
-- `POST /api/properties` - Create property (agent only)
-- `PATCH /api/properties/:id` - Update property (agent only)
-- `DELETE /api/properties/:id` - Delete property (agent only)
+- `POST /api/properties` - Create property, auto-tags with org (agent only)
+- `PATCH /api/properties/:id` - Update property, org ownership check (agent only)
+- `DELETE /api/properties/:id` - Delete property, org ownership check (agent only)
 - `POST /api/leads` - Create lead (public, validates propertyId)
-- `GET /api/leads` - List all leads (agent only)
+- `GET /api/leads` - List leads filtered by org (agent only)
 - `POST /api/swipe` - Record swipe (public), trigger notifications for high matches (>85%)
 - `GET /api/notifications` - List notifications (agent only)
 - `GET /api/notifications/count` - Unread count (agent only)
 - `PATCH /api/notifications/:id/read` - Mark read (agent only)
 - `PATCH /api/notifications/read-all` - Mark all read (agent only)
+- `GET /api/organizations` - List all orgs (super admin only)
+- `POST /api/auth/signup` - Register new agent with optional invite code
 
 ### Database Schema
-- **agents**: id, email, passwordHash, name
-- **properties**: id, title, description, price, bedrooms, bathrooms, sqft, location, images (JSON), agentId, status, vibe, tags (JSON)
+- **organizations**: id, name, subscriptionTier, logoUrl, inviteCode, createdAt
+- **agents**: id, email, passwordHash, name, role (agent|super_admin), organizationId
+- **properties**: id, title, description, price, bedrooms, bathrooms, sqft, location, images (JSON), agentId, status, vibe, tags (JSON), organizationId
 - **leads**: id, propertyId, name, phone, createdAt
 - **notifications**: id, recipientId, type, content (JSON), priority, readStatus, createdAt
 
 ### Key Files
-- `shared/schema.ts` - Drizzle schema + Zod validation (agents, properties, leads, notifications, loginSchema, swipeSchema)
-- `server/storage.ts` - Database storage interface with agent + notification CRUD
-- `server/routes.ts` - API routes with requireAgent middleware
+- `shared/schema.ts` - Drizzle schema + Zod validation (organizations, agents, properties, leads, notifications, loginSchema, signupSchema, swipeSchema)
+- `server/storage.ts` - Database storage interface with org-aware CRUD
+- `server/routes.ts` - API routes with requireAgent middleware + org silo logic + super admin bypass
 - `server/notificationService.ts` - Email dispatch via Nodemailer (Ethereal for dev)
-- `server/seed.ts` - Seed data (5 properties + default agent)
-- `client/src/hooks/use-auth.ts` - Auth hook using /api/auth/me
-- `client/src/pages/login.tsx` - Agent login form
+- `server/seed.ts` - Seed data (2 orgs, super admin, default agent, 5 properties)
+- `client/src/hooks/use-auth.ts` - Auth hook with org/role/superAdmin info
+- `client/src/pages/login.tsx` - Tabbed login/signup form with invite code
 - `client/src/pages/consumer.tsx` - Consumer swipe app with Framer Motion
 - `client/src/pages/dashboard.tsx` - Agent dashboard
 - `client/src/pages/listings.tsx` - Property CRUD grid with lifestyle tag selector
-- `client/src/components/app-sidebar.tsx` - Agent navigation sidebar with logout
+- `client/src/components/app-sidebar.tsx` - Agent navigation sidebar with org name + logout
 - `client/src/components/notification-bell.tsx` - Notification bell with dropdown feed
 
 ### Consumer Card Features (Phase 3)

@@ -19,6 +19,8 @@ declare module "express-session" {
     agentId?: number;
     agentEmail?: string;
     agentName?: string;
+    organizationId?: number | null;
+    role?: string;
   }
 }
 

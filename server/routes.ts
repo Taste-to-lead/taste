@@ -1,9 +1,15 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema } from "@shared/schema";
+import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema, signupSchema } from "@shared/schema";
 import { sendEmail, buildMatchEmailHtml } from "./notificationService";
 import bcrypt from "bcryptjs";
+
+const SUPER_ADMIN_EMAIL = "vinnysladeb@gmail.com";
+
+function isSuperAdmin(req: Request): boolean {
+  return req.session?.agentEmail === SUPER_ADMIN_EMAIL;
+}
 
 function requireAgent(req: Request, res: Response, next: NextFunction) {
   if (!req.session?.agentId) {
@@ -31,7 +37,86 @@ export async function registerRoutes(
       req.session.agentId = agent.id;
       req.session.agentEmail = agent.email;
       req.session.agentName = agent.name;
-      res.json({ id: agent.id, email: agent.email, name: agent.name });
+      req.session.organizationId = agent.organizationId;
+      req.session.role = agent.role;
+
+      let orgName: string | undefined;
+      if (agent.organizationId) {
+        const org = await storage.getOrganization(agent.organizationId);
+        orgName = org?.name;
+      }
+
+      res.json({
+        id: agent.id,
+        email: agent.email,
+        name: agent.name,
+        role: agent.role,
+        organizationId: agent.organizationId,
+        organizationName: orgName,
+        isSuperAdmin: agent.email === SUPER_ADMIN_EMAIL,
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/auth/signup", async (req, res) => {
+    try {
+      const parsed = signupSchema.parse(req.body);
+
+      const existing = await storage.getAgentByEmail(parsed.email);
+      if (existing) {
+        return res.status(409).json({ message: "An account with this email already exists" });
+      }
+
+      let organizationId: number | null = null;
+
+      if (parsed.inviteCode && parsed.inviteCode.trim() !== "") {
+        const org = await storage.getOrganizationByInviteCode(parsed.inviteCode.trim());
+        if (!org) {
+          return res.status(400).json({ message: "Invalid invite code" });
+        }
+        organizationId = org.id;
+      } else {
+        const allOrgs = await storage.getAllOrganizations();
+        const freelanceOrg = allOrgs.find(o => o.name === "Public / Freelance");
+        if (freelanceOrg) {
+          organizationId = freelanceOrg.id;
+        }
+      }
+
+      const passwordHash = await bcrypt.hash(parsed.password, 10);
+      const role = parsed.email === SUPER_ADMIN_EMAIL ? "super_admin" : "agent";
+
+      const agent = await storage.createAgent({
+        email: parsed.email,
+        passwordHash,
+        name: parsed.name,
+        role,
+        organizationId,
+      });
+
+      req.session.agentId = agent.id;
+      req.session.agentEmail = agent.email;
+      req.session.agentName = agent.name;
+      req.session.organizationId = agent.organizationId;
+      req.session.role = agent.role;
+
+      let orgName: string | undefined;
+      if (agent.organizationId) {
+        const org = await storage.getOrganization(agent.organizationId);
+        orgName = org?.name;
+      }
+
+      res.status(201).json({
+        id: agent.id,
+        email: agent.email,
+        name: agent.name,
+        role: agent.role,
+        organizationId: agent.organizationId,
+        organizationName: orgName,
+        isSuperAdmin: agent.email === SUPER_ADMIN_EMAIL,
+      });
     } catch (error: any) {
       res.status(400).json({ message: error.message });
     }
@@ -47,14 +132,25 @@ export async function registerRoutes(
     });
   });
 
-  app.get("/api/auth/me", (req, res) => {
+  app.get("/api/auth/me", async (req, res) => {
     if (!req.session?.agentId) {
       return res.status(401).json({ message: "Not authenticated" });
     }
+
+    let orgName: string | undefined;
+    if (req.session.organizationId) {
+      const org = await storage.getOrganization(req.session.organizationId);
+      orgName = org?.name;
+    }
+
     res.json({
       id: req.session.agentId,
       email: req.session.agentEmail,
       name: req.session.agentName,
+      role: req.session.role,
+      organizationId: req.session.organizationId,
+      organizationName: orgName,
+      isSuperAdmin: req.session.agentEmail === SUPER_ADMIN_EMAIL,
     });
   });
 
@@ -68,8 +164,14 @@ export async function registerRoutes(
       if (req.query.vibe) filters.vibe = req.query.vibe as string;
       if (req.query.status) filters.status = req.query.status as string;
 
+      if (req.session?.agentId && !isSuperAdmin(req)) {
+        if (req.session.organizationId) {
+          filters.organizationId = req.session.organizationId;
+        }
+      }
+
       const properties = await storage.getProperties(
-        Object.keys(filters).length > 0 ? filters : undefined
+        Object.keys(filters).length > 0 ? filters as any : undefined
       );
       res.json(properties);
     } catch (error: any) {
@@ -92,6 +194,7 @@ export async function registerRoutes(
   app.post("/api/properties", requireAgent, async (req, res) => {
     try {
       const parsed = insertPropertySchema.parse(req.body);
+      parsed.organizationId = req.session.organizationId ?? null;
       const property = await storage.createProperty(parsed);
       res.status(201).json(property);
     } catch (error: any) {
@@ -106,6 +209,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Property not found" });
       }
+      if (!isSuperAdmin(req) && existing.organizationId !== req.session.organizationId) {
+        return res.status(403).json({ message: "Forbidden: property belongs to another organization" });
+      }
       const property = await storage.updateProperty(id, req.body);
       res.json(property);
     } catch (error: any) {
@@ -116,6 +222,13 @@ export async function registerRoutes(
   app.delete("/api/properties/:id", requireAgent, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const existing = await storage.getProperty(id);
+      if (!existing) {
+        return res.status(404).json({ message: "Property not found" });
+      }
+      if (!isSuperAdmin(req) && existing.organizationId !== req.session.organizationId) {
+        return res.status(403).json({ message: "Forbidden: property belongs to another organization" });
+      }
       const deleted = await storage.deleteProperty(id);
       if (!deleted) {
         return res.status(404).json({ message: "Property not found" });
@@ -142,7 +255,8 @@ export async function registerRoutes(
 
   app.get("/api/leads", requireAgent, async (req, res) => {
     try {
-      const leads = await storage.getLeads();
+      const orgId = isSuperAdmin(req) ? undefined : req.session.organizationId ?? undefined;
+      const leads = await storage.getLeads(orgId);
       res.json(leads);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -243,6 +357,18 @@ export async function registerRoutes(
       const recipientId = (req.body.recipientId as string) || "agent-1";
       await storage.markAllNotificationsRead(recipientId);
       res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/organizations", requireAgent, async (req, res) => {
+    try {
+      if (!isSuperAdmin(req)) {
+        return res.status(403).json({ message: "Super Admin access required" });
+      }
+      const orgs = await storage.getAllOrganizations();
+      res.json(orgs);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
