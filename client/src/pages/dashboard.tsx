@@ -1,6 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { Building2, Users, DollarSign, TrendingUp } from "lucide-react";
+import { Building2, Users, DollarSign, TrendingUp, Crown, ExternalLink } from "lucide-react";
 import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { useAuth } from "@/hooks/use-auth";
 import type { Property } from "@shared/schema";
 
 function StatCard({ icon: Icon, label, value, subtext }: {
@@ -26,6 +29,7 @@ function StatCard({ icon: Icon, label, value, subtext }: {
 }
 
 export default function Dashboard() {
+  const { isPremium, isSuperAdmin } = useAuth();
   const { data: properties, isLoading } = useQuery<Property[]>({
     queryKey: ["/api/properties"],
   });
@@ -60,9 +64,28 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight font-serif" data-testid="text-dashboard-title">Taste to Lead | Agent Console</h1>
-        <p className="text-muted-foreground text-sm mt-1">Welcome back to your command center</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight font-serif" data-testid="text-dashboard-title">Taste to Lead | Agent Console</h1>
+          <p className="text-muted-foreground text-sm mt-1">Welcome back to your command center</p>
+        </div>
+        {!isPremium && !isSuperAdmin && (
+          <Button
+            data-testid="button-upgrade-premium"
+            onClick={() => window.open("https://esotarot.lemonsqueezy.com/checkout", "_blank")}
+            className="bg-gradient-to-r from-amber-500 to-yellow-500 text-black font-semibold"
+          >
+            <Crown className="w-4 h-4 mr-2" />
+            Upgrade to Premium
+            <ExternalLink className="w-3 h-3 ml-2" />
+          </Button>
+        )}
+        {(isPremium || isSuperAdmin) && (
+          <Badge variant="outline" className="border-amber-500/50 text-amber-400" data-testid="badge-premium">
+            <Crown className="w-3 h-3 mr-1" />
+            {isSuperAdmin ? "Super Admin" : "Premium"}
+          </Badge>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

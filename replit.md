@@ -116,6 +116,15 @@ A full-stack multi-tenant real estate SaaS platform with two distinct experience
 - **Smart feed**: GET /api/properties sorts consumer results by taste profile match percentage
 - **Taste profile endpoint**: GET /api/taste-profile returns current session's accumulated preferences
 
+### Lemon Squeezy Payments (Phase 8)
+- **Webhook**: POST /api/webhooks/lemon-squeezy with HMAC SHA256 signature verification
+- **Secret**: LEMONSQUEEZY_WEBHOOK_SECRET used for signature validation
+- **order_created event**: Extracts user_email, finds agent, upgrades subscriptionTier to "premium" + assigns premium org
+- **Frontend**: "Upgrade to Premium" button on dashboard opens https://esotarot.lemonsqueezy.com/checkout
+- **Premium badge**: Shows gold "Premium" or "Super Admin" badge when upgraded
+- **Agent schema**: subscriptionTier column added (default: "free")
+- **Live Webhook URL**: https://[app-url]/api/webhooks/lemon-squeezy
+
 ### Production Deployment (Phase 6)
 - **PWA**: manifest.json with "Taste: Curated Real Estate" name, custom icons (192/512), standalone display, portrait orientation
 - **Service Worker**: Caches images (cache-first), Google Fonts (cache-first), pages (network-first); skips /api/ requests

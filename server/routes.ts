@@ -1,5 +1,6 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
+import crypto from "crypto";
 import { storage } from "./storage";
 import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema, signupSchema } from "@shared/schema";
 import { sendEmail, buildMatchEmailHtml } from "./notificationService";
@@ -52,6 +53,7 @@ export async function registerRoutes(
         email: agent.email,
         name: agent.name,
         role: agent.role,
+        subscriptionTier: agent.subscriptionTier,
         organizationId: agent.organizationId,
         organizationName: orgName,
         isSuperAdmin: agent.email === SUPER_ADMIN_EMAIL,
@@ -114,6 +116,7 @@ export async function registerRoutes(
         email: agent.email,
         name: agent.name,
         role: agent.role,
+        subscriptionTier: agent.subscriptionTier,
         organizationId: agent.organizationId,
         organizationName: orgName,
         isSuperAdmin: agent.email === SUPER_ADMIN_EMAIL,
@@ -144,11 +147,14 @@ export async function registerRoutes(
       orgName = org?.name;
     }
 
+    const currentAgent = await storage.getAgent(req.session.agentId);
+
     res.json({
       id: req.session.agentId,
       email: req.session.agentEmail,
       name: req.session.agentName,
       role: req.session.role,
+      subscriptionTier: currentAgent?.subscriptionTier ?? "free",
       organizationId: req.session.organizationId,
       organizationName: orgName,
       isSuperAdmin: req.session.agentEmail === SUPER_ADMIN_EMAIL,
@@ -423,6 +429,73 @@ export async function registerRoutes(
       const orgs = await storage.getAllOrganizations();
       res.json(orgs);
     } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/webhooks/lemon-squeezy", async (req, res) => {
+    try {
+      const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET;
+      if (!secret) {
+        console.error("[LemonSqueezy] LEMONSQUEEZY_WEBHOOK_SECRET not set");
+        return res.status(500).json({ message: "Webhook secret not configured" });
+      }
+
+      const signature = req.headers["x-signature"] as string;
+      if (!signature) {
+        return res.status(401).json({ message: "Missing signature" });
+      }
+
+      const rawBody = req.rawBody;
+      if (!rawBody) {
+        return res.status(400).json({ message: "Missing request body" });
+      }
+
+      const hmac = crypto.createHmac("sha256", secret);
+      const digest = hmac.update(rawBody as Buffer).digest("hex");
+
+      if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))) {
+        console.warn("[LemonSqueezy] Invalid webhook signature");
+        return res.status(401).json({ message: "Invalid signature" });
+      }
+
+      const event = req.body;
+      const eventName = event?.meta?.event_name;
+
+      console.log(`[LemonSqueezy] Received event: ${eventName}`);
+
+      if (eventName === "order_created") {
+        const userEmail = event?.data?.attributes?.user_email
+          || event?.meta?.custom_data?.user_email;
+
+        if (!userEmail) {
+          console.warn("[LemonSqueezy] No user_email in order_created payload");
+          return res.status(200).json({ message: "No user email found, skipping" });
+        }
+
+        console.log(`[LemonSqueezy] Processing upgrade for: ${userEmail}`);
+
+        const agent = await storage.getAgentByEmail(userEmail);
+        if (!agent) {
+          console.warn(`[LemonSqueezy] No agent found for email: ${userEmail}`);
+          return res.status(200).json({ message: "Agent not found, skipping" });
+        }
+
+        const premiumOrg = await storage.getOrganizationByInviteCode("TASTE-PRO-2025");
+        const updateData: any = { subscriptionTier: "premium" };
+        if (premiumOrg) {
+          updateData.organizationId = premiumOrg.id;
+        }
+
+        await storage.updateAgentByEmail(userEmail, updateData);
+        console.log(`[LemonSqueezy] Upgraded ${userEmail} to premium`);
+
+        return res.status(200).json({ message: "Upgrade processed" });
+      }
+
+      res.status(200).json({ message: "Event received" });
+    } catch (error: any) {
+      console.error(`[LemonSqueezy] Webhook error: ${error.message}`);
       res.status(500).json({ message: error.message });
     }
   });
