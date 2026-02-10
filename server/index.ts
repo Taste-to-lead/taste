@@ -21,6 +21,7 @@ declare module "express-session" {
     agentName?: string;
     organizationId?: number | null;
     role?: string;
+    isAdmin?: boolean;
     tasteProfile?: Record<string, number>;
   }
 }

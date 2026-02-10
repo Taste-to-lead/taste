@@ -34,6 +34,9 @@ export interface IStorage {
   getAllOrganizations(): Promise<Organization[]>;
   createSyncRequest(data: InsertSyncRequest): Promise<SyncRequest>;
   getSyncRequests(userId: number): Promise<SyncRequest[]>;
+  getAllAgents(): Promise<Agent[]>;
+  getAllProperties(): Promise<Property[]>;
+  updateAgent(id: number, data: Partial<InsertAgent>): Promise<Agent | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -199,6 +202,19 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(syncRequests)
       .where(eq(syncRequests.userId, userId))
       .orderBy(desc(syncRequests.createdAt));
+  }
+
+  async getAllAgents(): Promise<Agent[]> {
+    return db.select().from(agents);
+  }
+
+  async getAllProperties(): Promise<Property[]> {
+    return db.select().from(properties);
+  }
+
+  async updateAgent(id: number, data: Partial<InsertAgent>): Promise<Agent | undefined> {
+    const [agent] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
+    return agent;
   }
 }
 

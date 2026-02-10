@@ -31,6 +31,7 @@ A full-stack multi-tenant real estate SaaS platform with two distinct experience
 - `/agent` - Agent Dashboard (protected, requires login)
 - `/agent/listings` - Property CRUD grid (protected)
 - `/agent/settings` - Agent preferences (protected)
+- `/admin` - God Mode admin dashboard (admin only, requires isAdmin)
 - `/discover` - Redirects to `/`
 - `/dashboard` - Redirects to `/agent`
 
@@ -38,9 +39,11 @@ A full-stack multi-tenant real estate SaaS platform with two distinct experience
 - **Public routes**: GET `/api/properties`, GET `/api/properties/:id`, POST `/api/leads`, POST `/api/swipe`
 - **Protected routes**: All POST/PATCH/DELETE on properties, GET leads, all notification endpoints
 - **Auth endpoints**: POST `/api/auth/login`, POST `/api/auth/signup`, POST `/api/auth/logout`, GET `/api/auth/me`
+- **Admin routes**: GET `/api/admin/users`, GET `/api/admin/listings`, POST `/api/admin/listing/:id/delete` (requireAdmin middleware)
 - **Super Admin endpoint**: GET `/api/organizations` (super admin only)
 - **Default agent**: agent@taste.com / agent123 (Taste Realty Group)
 - **Super admin**: vinnysladeb@gmail.com / admin123
+- **Auto-promote**: vinnysladeb@gmail.com auto-gets isAdmin=true on login
 
 ### API Endpoints
 - `GET /api/properties` - List with filters + org silo (public shows all, agent sees own org)
@@ -64,7 +67,7 @@ A full-stack multi-tenant real estate SaaS platform with two distinct experience
 
 ### Database Schema
 - **organizations**: id, name, subscriptionTier, logoUrl, inviteCode, createdAt
-- **agents**: id, email, passwordHash, name, role (agent|super_admin), subscriptionTier, organizationId
+- **agents**: id, email, passwordHash, name, role (agent|super_admin), subscriptionTier, organizationId, isAdmin (boolean, default false)
 - **properties**: id, title, description, price, bedrooms, bathrooms, sqft, location, images (JSON), agentId, status, vibe, vibeTag, tags (JSON), organizationId
 - **leads**: id, propertyId, name, phone, createdAt
 - **notifications**: id, recipientId, type, content (JSON), priority, readStatus, createdAt

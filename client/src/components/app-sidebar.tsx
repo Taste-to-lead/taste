@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Settings, Sparkles, LogOut, Shield } from "lucide-react";
+import { LayoutDashboard, Building2, Settings, Sparkles, LogOut, Shield, Zap } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -25,7 +25,7 @@ const navItems = [
 
 export function AppSidebar() {
   const [location, setLocation] = useLocation();
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
 
   const logoutMutation = useMutation({
     mutationFn: async () => {
@@ -66,6 +66,16 @@ export function AppSidebar() {
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
+              {isAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild isActive={location === "/admin"}>
+                    <Link href="/admin" data-testid="nav-admin">
+                      <Zap />
+                      <span>God Mode</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

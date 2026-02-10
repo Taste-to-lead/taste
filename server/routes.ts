@@ -20,6 +20,16 @@ function requireAgent(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.session?.agentId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  if (!req.session?.isAdmin) {
+    return res.status(403).json({ message: "Admin access required" });
+  }
+  next();
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -39,7 +49,7 @@ export async function registerRoutes(
   app.post("/api/auth/login", async (req, res) => {
     try {
       const parsed = loginSchema.parse(req.body);
-      const agent = await storage.getAgentByEmail(parsed.email);
+      let agent = await storage.getAgentByEmail(parsed.email);
       if (!agent) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
@@ -47,11 +57,18 @@ export async function registerRoutes(
       if (!valid) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
+
+      if (agent.email === SUPER_ADMIN_EMAIL && !agent.isAdmin) {
+        const updated = await storage.updateAgent(agent.id, { isAdmin: true } as any);
+        if (updated) agent = updated;
+      }
+
       req.session.agentId = agent.id;
       req.session.agentEmail = agent.email;
       req.session.agentName = agent.name;
       req.session.organizationId = agent.organizationId;
       req.session.role = agent.role;
+      req.session.isAdmin = agent.isAdmin;
 
       let orgName: string | undefined;
       if (agent.organizationId) {
@@ -68,6 +85,7 @@ export async function registerRoutes(
         organizationId: agent.organizationId,
         organizationName: orgName,
         isSuperAdmin: agent.email === SUPER_ADMIN_EMAIL,
+        isAdmin: agent.isAdmin,
       });
     } catch (error: any) {
       res.status(400).json({ message: error.message });
@@ -169,6 +187,7 @@ export async function registerRoutes(
       organizationId: req.session.organizationId,
       organizationName: orgName,
       isSuperAdmin: req.session.agentEmail === SUPER_ADMIN_EMAIL,
+      isAdmin: currentAgent?.isAdmin ?? false,
     });
   });
 
@@ -472,6 +491,46 @@ export async function registerRoutes(
       }
       const orgs = await storage.getAllOrganizations();
       res.json(orgs);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/admin/users", requireAdmin, async (req, res) => {
+    try {
+      const allAgents = await storage.getAllAgents();
+      const users = allAgents.map((a) => ({
+        id: a.id,
+        email: a.email,
+        name: a.name,
+        role: a.role,
+        subscriptionTier: a.subscriptionTier,
+        isAdmin: a.isAdmin,
+        organizationId: a.organizationId,
+      }));
+      res.json(users);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/admin/listings", requireAdmin, async (req, res) => {
+    try {
+      const allProps = await storage.getAllProperties();
+      res.json(allProps);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/admin/listing/:id/delete", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteProperty(id);
+      if (!deleted) {
+        return res.status(404).json({ message: "Listing not found" });
+      }
+      res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

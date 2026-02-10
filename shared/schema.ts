@@ -28,6 +28,7 @@ export const agents = pgTable("agents", {
   role: text("role").notNull().default("agent"),
   subscriptionTier: text("subscription_tier").notNull().default("free"),
   organizationId: integer("organization_id"),
+  isAdmin: boolean("is_admin").notNull().default(false),
 });
 
 export const insertAgentSchema = createInsertSchema(agents).omit({

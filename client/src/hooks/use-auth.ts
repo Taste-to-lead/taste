@@ -10,6 +10,7 @@ type AuthUser = {
   organizationId: number | null;
   organizationName?: string;
   isSuperAdmin: boolean;
+  isAdmin: boolean;
 } | null;
 
 export function useAuth() {
@@ -25,6 +26,7 @@ export function useAuth() {
     isLoading,
     isAuthenticated: !!user,
     isSuperAdmin: user?.isSuperAdmin ?? false,
+    isAdmin: user?.isAdmin ?? false,
     isPremium: user?.subscriptionTier === "premium",
     organizationName: user?.organizationName ?? null,
   };

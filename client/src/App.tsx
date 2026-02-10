@@ -13,6 +13,7 @@ import Listings from "@/pages/listings";
 import Settings from "@/pages/settings";
 import Consumer from "@/pages/consumer";
 import Login from "@/pages/login";
+import Admin from "@/pages/admin";
 
 function AgentLayout({ children }: { children: React.ReactNode }) {
   const style = {
@@ -74,6 +75,11 @@ function Router() {
       <Route path="/agent/settings">
         <ProtectedRoute>
           <AgentLayout><Settings /></AgentLayout>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/admin">
+        <ProtectedRoute>
+          <AgentLayout><Admin /></AgentLayout>
         </ProtectedRoute>
       </Route>
       <Route path="/discover">
