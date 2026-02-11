@@ -1,23 +1,64 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.ethereal.email",
-  port: 587,
-  auth: {
-    user: process.env.SMTP_USER || "test@ethereal.email",
-    pass: process.env.SMTP_PASS || "testpass",
-  },
-});
+// Resend integration via Replit connector
+let connectionSettings: any;
+
+async function getCredentials() {
+  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
+  const xReplitToken = process.env.REPL_IDENTITY
+    ? "repl " + process.env.REPL_IDENTITY
+    : process.env.WEB_REPL_RENEWAL
+      ? "depl " + process.env.WEB_REPL_RENEWAL
+      : null;
+
+  if (!xReplitToken) {
+    throw new Error("X_REPLIT_TOKEN not found for repl/depl");
+  }
+
+  connectionSettings = await fetch(
+    "https://" + hostname + "/api/v2/connection?include_secrets=true&connector_names=resend",
+    {
+      headers: {
+        Accept: "application/json",
+        X_REPLIT_TOKEN: xReplitToken,
+      },
+    }
+  )
+    .then((res) => res.json())
+    .then((data) => data.items?.[0]);
+
+  if (!connectionSettings || !connectionSettings.settings.api_key) {
+    throw new Error("Resend not connected");
+  }
+  return {
+    apiKey: connectionSettings.settings.api_key,
+    fromEmail: connectionSettings.settings.from_email,
+  };
+}
+
+async function getResendClient() {
+  const { apiKey, fromEmail } = await getCredentials();
+  return { client: new Resend(apiKey), fromEmail };
+}
 
 export async function sendEmail(to: string, subject: string, body: string): Promise<void> {
   try {
-    const info = await transporter.sendMail({
-      from: '"Taste Alerts" <alerts@taste.com>',
-      to,
+    const { client, fromEmail } = await getResendClient();
+    const isVerifiedDomain = fromEmail && !fromEmail.includes("@gmail.") && !fromEmail.includes("@yahoo.") && !fromEmail.includes("@hotmail.") && !fromEmail.includes("@outlook.");
+    const senderEmail = isVerifiedDomain ? fromEmail : "Taste <onboarding@resend.dev>";
+    console.log(`[NotificationService] Sending from: ${senderEmail} to: ${to}`);
+    const { data, error } = await client.emails.send({
+      from: senderEmail,
+      to: [to],
       subject,
       html: body,
     });
-    console.log(`[NotificationService] Email sent: ${info.messageId}`);
+
+    if (error) {
+      console.error("[NotificationService] Resend error:", error);
+      return;
+    }
+    console.log(`[NotificationService] Email sent via Resend: ${data?.id}`);
   } catch (error) {
     console.error("[NotificationService] Email send failed:", error);
   }
