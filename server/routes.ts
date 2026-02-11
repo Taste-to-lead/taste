@@ -8,6 +8,7 @@ import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema, signu
 import { eq, and, gt } from "drizzle-orm";
 import { sendEmail, buildMatchEmailHtml } from "./notificationService";
 import { classifyPropertyImage } from "./geminiTagger";
+import { importFromUrl } from "./webScraper";
 import bcrypt from "bcryptjs";
 
 const SUPER_ADMIN_EMAIL = "vinnysladeb@gmail.com";
@@ -601,8 +602,16 @@ export async function registerRoutes(
         userId: req.session.agentId,
         websiteUrl,
         status: "pending",
+        importedCount: 0,
       });
+
       res.status(201).json(syncRequest);
+
+      const agentIdStr = String(agent.id);
+      const orgId = agent.organizationId ?? null;
+      importFromUrl(syncRequest.id, websiteUrl, agentIdStr, orgId).catch((err) => {
+        console.error("[SyncRequest] Background import failed:", err.message);
+      });
     } catch (error: any) {
       res.status(400).json({ message: error.message });
     }

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, MapPin, Bed, Bath, Ruler, X, Building2, Lock, Crown, ExternalLink } from "lucide-react";
+import { Plus, Pencil, Trash2, MapPin, Bed, Bath, Ruler, X, Building2, Lock, Crown, ExternalLink, Download, Loader2, CheckCircle2, AlertCircle, Globe } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { Property } from "@shared/schema";
+import type { Property, SyncRequest } from "@shared/schema";
 
 const propertyFormSchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters"),
@@ -133,6 +133,8 @@ export default function Listings() {
   const [editingProperty, setEditingProperty] = useState<Property | null>(null);
   const [deletingProperty, setDeletingProperty] = useState<Property | null>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const { toast } = useToast();
   const { isPremium, isSuperAdmin } = useAuth();
@@ -140,6 +142,46 @@ export default function Listings() {
 
   const { data: properties, isLoading } = useQuery<Property[]>({
     queryKey: ["/api/properties"],
+  });
+
+  const { data: syncRequests } = useQuery<SyncRequest[]>({
+    queryKey: ["/api/sync-requests"],
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data && data.some((r: SyncRequest) => r.status === "pending" || r.status === "processing")) {
+        return 3000;
+      }
+      return false;
+    },
+  });
+
+  const hasActiveImport = syncRequests?.some((r) => r.status === "pending" || r.status === "processing");
+
+  useEffect(() => {
+    if (syncRequests) {
+      const justCompleted = syncRequests.find(
+        (r) => r.status === "completed" && r.importedCount > 0
+      );
+      if (justCompleted) {
+        queryClient.invalidateQueries({ queryKey: ["/api/properties"] });
+      }
+    }
+  }, [syncRequests]);
+
+  const importMutation = useMutation({
+    mutationFn: async (websiteUrl: string) => {
+      const res = await apiRequest("POST", "/api/sync-requests", { websiteUrl });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/sync-requests"] });
+      setShowImportDialog(false);
+      setImportUrl("");
+      toast({ title: "Import started", description: "We're scanning the page and importing listings. This may take a minute." });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Import failed", description: err.message, variant: "destructive" });
+    },
   });
 
   const form = useForm<PropertyFormValues>({
@@ -504,29 +546,88 @@ export default function Listings() {
           <h1 className="text-2xl font-bold tracking-tight" data-testid="text-listings-title">Listings</h1>
           <p className="text-muted-foreground text-sm mt-1">{properties?.length ?? 0} properties in your portfolio</p>
         </div>
-        <Button
-          onClick={() => {
-            if (!canUsePremiumFeatures) {
-              setShowUpgradeModal(true);
-            } else {
-              handleOpenCreate();
-            }
-          }}
-          data-testid="button-create-listing"
-        >
-          {!canUsePremiumFeatures ? (
-            <>
-              <Lock className="w-4 h-4 mr-2" />
-              Add Listing
-            </>
-          ) : (
-            <>
-              <Plus className="w-4 h-4 mr-2" />
-              Add Listing
-            </>
-          )}
-        </Button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            onClick={() => {
+              if (!canUsePremiumFeatures) {
+                setShowUpgradeModal(true);
+              } else {
+                setShowImportDialog(true);
+              }
+            }}
+            data-testid="button-import-listing"
+            disabled={importMutation.isPending || !!hasActiveImport}
+          >
+            {hasActiveImport ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Importing...
+              </>
+            ) : (
+              <>
+                <Globe className="w-4 h-4 mr-2" />
+                Import from URL
+              </>
+            )}
+          </Button>
+          <Button
+            onClick={() => {
+              if (!canUsePremiumFeatures) {
+                setShowUpgradeModal(true);
+              } else {
+                handleOpenCreate();
+              }
+            }}
+            data-testid="button-create-listing"
+          >
+            {!canUsePremiumFeatures ? (
+              <>
+                <Lock className="w-4 h-4 mr-2" />
+                Add Listing
+              </>
+            ) : (
+              <>
+                <Plus className="w-4 h-4 mr-2" />
+                Add Listing
+              </>
+            )}
+          </Button>
+        </div>
       </div>
+
+      {syncRequests && syncRequests.length > 0 && (
+        <div className="space-y-2">
+          {syncRequests.slice(0, 5).map((req) => (
+            <Card key={req.id} className="p-3 flex items-center gap-3 bg-card/80 border-card-border" data-testid={`import-status-${req.id}`}>
+              {req.status === "pending" || req.status === "processing" ? (
+                <Loader2 className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
+              ) : req.status === "completed" ? (
+                <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm truncate">{req.websiteUrl}</p>
+                <p className="text-xs text-muted-foreground">
+                  {req.status === "pending" && "Queued for import..."}
+                  {req.status === "processing" && "Scanning page and importing listings..."}
+                  {req.status === "completed" && req.importedCount > 0 && `Imported ${req.importedCount} listing${req.importedCount !== 1 ? "s" : ""}`}
+                  {req.status === "completed" && req.importedCount === 0 && (req.errorMessage || "No listings found on this page")}
+                  {req.status === "failed" && (req.errorMessage || "Import failed")}
+                </p>
+              </div>
+              <Badge variant={
+                req.status === "completed" && req.importedCount > 0 ? "default" :
+                req.status === "failed" ? "destructive" :
+                req.status === "pending" || req.status === "processing" ? "secondary" : "outline"
+              }>
+                {req.status === "processing" ? "Importing" : req.status}
+              </Badge>
+            </Card>
+          ))}
+        </div>
+      )}
 
       {(!properties || properties.length === 0) ? (
         <Card className="p-12 flex flex-col items-center justify-center text-center backdrop-blur-xl bg-card/80 border-card-border">
@@ -630,6 +731,55 @@ export default function Listings() {
             Upgrade to Premium
             <ExternalLink className="w-3 h-3 ml-2" />
           </Button>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
+        <DialogContent className="max-w-md backdrop-blur-xl bg-card border-card-border" data-testid="dialog-import-listing">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Globe className="w-5 h-5" />
+              Import Listings from URL
+            </DialogTitle>
+            <DialogDescription>
+              Paste a property listing URL and our AI will extract the listing details, images, and automatically classify the vibe.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <Input
+                placeholder="https://www.zillow.com/homedetails/..."
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+                data-testid="input-import-url"
+              />
+              <p className="text-xs text-muted-foreground">
+                Works with Zillow, Realtor.com, Redfin, MLS, and most real estate listing pages.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowImportDialog(false)} data-testid="button-cancel-import">
+              Cancel
+            </Button>
+            <Button
+              onClick={() => importUrl && importMutation.mutate(importUrl)}
+              disabled={!importUrl || importMutation.isPending || !importUrl.startsWith("http")}
+              data-testid="button-confirm-import"
+            >
+              {importMutation.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Starting Import...
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4 mr-2" />
+                  Import Listings
+                </>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

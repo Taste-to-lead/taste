@@ -33,6 +33,7 @@ export interface IStorage {
   getOrganizationByInviteCode(code: string): Promise<Organization | undefined>;
   getAllOrganizations(): Promise<Organization[]>;
   createSyncRequest(data: InsertSyncRequest): Promise<SyncRequest>;
+  updateSyncRequest(id: number, data: Partial<InsertSyncRequest>): Promise<SyncRequest | undefined>;
   getSyncRequests(userId: number): Promise<SyncRequest[]>;
   getAllAgents(): Promise<Agent[]>;
   getAllProperties(): Promise<Property[]>;
@@ -200,6 +201,11 @@ export class DatabaseStorage implements IStorage {
   async createSyncRequest(data: InsertSyncRequest): Promise<SyncRequest> {
     const [request] = await db.insert(syncRequests).values(data).returning();
     return request;
+  }
+
+  async updateSyncRequest(id: number, data: Partial<InsertSyncRequest>): Promise<SyncRequest | undefined> {
+    const [updated] = await db.update(syncRequests).set(data).where(eq(syncRequests.id, id)).returning();
+    return updated;
   }
 
   async getSyncRequests(userId: number): Promise<SyncRequest[]> {

@@ -101,6 +101,8 @@ export const syncRequests = pgTable("sync_requests", {
   userId: integer("user_id").notNull(),
   websiteUrl: text("website_url").notNull(),
   status: text("status").notNull().default("pending"),
+  importedCount: integer("imported_count").notNull().default(0),
+  errorMessage: text("error_message"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
