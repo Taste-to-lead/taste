@@ -9,3 +9,6 @@ vite.config.ts.*
 .env
 .env.local
 .env.*.local
+
+# Google Cloud credentials - DO NOT COMMIT
+google-auth.json
