@@ -1,15 +1,17 @@
-const CACHE_NAME = "luxeestates-v1";
+const CACHE_NAME = "luxeestates-v2";
 const STATIC_ASSETS = [
   "/",
   "/discover",
   "/icon-192.png",
   "/icon-512.png",
+  "/favicon-32x32.png",
+  "/favicon-16x16.png",
   "/favicon.png",
   "/manifest.json",
 ];
 
-const IMAGE_CACHE = "luxeestates-images-v1";
-const FONT_CACHE = "luxeestates-fonts-v1";
+const IMAGE_CACHE = "luxeestates-images-v2";
+const FONT_CACHE = "luxeestates-fonts-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
