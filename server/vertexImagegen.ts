@@ -1,10 +1,9 @@
-import { PredictionServiceClient } from "@google-cloud/aiplatform";
-import { protos } from "@google-cloud/aiplatform";
+import { PredictionServiceClient, helpers } from "@google-cloud/aiplatform";
+import type { protos } from "@google-cloud/aiplatform";
 
 const PROJECT_ID = "gen-lang-client-0912710356";
 const LOCATION = "us-central1";
-const MODEL = "imagen-3.0-generate-001"; // Imagen 3
-// Fallback if above fails: "imagen-4.0-generate-001"
+const MODEL = "imagen-3.0-generate-001";
 
 export interface ImageGenerationResult {
   success: boolean;
@@ -14,10 +13,10 @@ export interface ImageGenerationResult {
 }
 
 export async function generateStagedImage(
-  prompt: string
+  prompt: string,
+  _referenceImage?: string
 ): Promise<ImageGenerationResult> {
   try {
-    // Initialize the client with credentials from environment
     const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     if (!credentialsPath) {
       return {
@@ -28,55 +27,45 @@ export async function generateStagedImage(
 
     const client = new PredictionServiceClient({
       keyFilename: credentialsPath,
+      apiEndpoint: "us-central1-aiplatform.googleapis.com",
     });
 
     const endpoint = `projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${MODEL}`;
 
-    // Build the prediction request
-    const parameters = {
+    // imagen-3.0-generate-001 is a text-to-image model.
+    // The Gemini analysis step already produces a detailed architectural prompt
+    // describing the room geometry, lighting, and target vibe — so text-to-image
+    // generates a faithful staged version.
+    const instance = helpers.toValue({
+      prompt,
+    }) as protos.google.protobuf.IValue;
+
+    const parameters = helpers.toValue({
       sampleCount: 1,
-      aspectRatio: "1:1", // Square format
-      safetyFilterLevel: "block_some",
-      personGeneration: "dont_allow", // Focus on interior spaces
-    };
+      aspectRatio: "4:3",
+    }) as protos.google.protobuf.IValue;
 
-    const instance = {
-      prompt: prompt,
-    };
-
-    const instanceValue: any = { structValue: { fields: {} } };
-    Object.entries(instance).forEach(([key, value]) => {
-      instanceValue.structValue.fields[key] = { stringValue: value };
-    });
-
-    const parametersValue: any = { structValue: { fields: {} } };
-    Object.entries(parameters).forEach(([key, value]) => {
-      if (typeof value === "string") {
-        parametersValue.structValue.fields[key] = { stringValue: value };
-      } else if (typeof value === "number") {
-        parametersValue.structValue.fields[key] = { numberValue: value };
-      }
-    });
-
-    const request = {
+    const request: protos.google.cloud.aiplatform.v1.IPredictRequest = {
       endpoint,
-      instances: [instanceValue],
-      parameters: parametersValue,
+      instances: [instance],
+      parameters,
     };
 
-    console.log(`[VertexImagegen] Generating image for prompt (${prompt.length} chars)`);
+    console.log(
+      `[VertexImagegen] Generating text-to-image for prompt (${prompt.length} chars)`
+    );
 
-    const [response] = await client.predict(request);
+    const response = await client.predict(request);
 
-    if (!response.predictions || response.predictions.length === 0) {
+    if (!response[0]?.predictions || response[0].predictions.length === 0) {
       return {
         success: false,
-        error: "No image generated",
+        error: "No image generated — empty predictions array",
       };
     }
 
-    const prediction = response.predictions[0] as any;
-    
+    const prediction = response[0].predictions[0] as any;
+
     // Check for safety filter blocks
     if (prediction.structValue?.fields?.safetyAttributes) {
       const safetyAttr = prediction.structValue.fields.safetyAttributes;
@@ -90,12 +79,20 @@ export async function generateStagedImage(
       }
     }
 
-    // Extract the base64 image data
-    const bytesValue = prediction.structValue?.fields?.bytesBase64Encoded?.stringValue;
+    // Imagen 3 returns the field as "bytesBase64Encoded"
+    const bytesValue =
+      prediction.structValue?.fields?.bytesBase64Encoded?.stringValue;
     if (!bytesValue) {
+      // Log the available fields for debugging
+      const availableFields = prediction.structValue?.fields
+        ? Object.keys(prediction.structValue.fields)
+        : [];
+      console.error(
+        `[VertexImagegen] No image data in response. Available fields: ${JSON.stringify(availableFields)}`
+      );
       return {
         success: false,
-        error: "No image data in response",
+        error: `No image data in response. Fields found: ${availableFields.join(", ") || "none"}`,
       };
     }
 
@@ -106,15 +103,16 @@ export async function generateStagedImage(
     };
   } catch (error: any) {
     console.error("[VertexImagegen] Error:", error.message);
-    
-    if (error.message?.includes("quota")) {
-      return {
-        success: false,
-        error: "Vertex AI quota exceeded. Please try again later.",
-      };
+
+    // Re-throw rate limit / quota errors so the retry wrapper can handle them
+    if (error.message?.includes("quota") || error.message?.includes("429") || error.message?.includes("Resource exhausted")) {
+      throw error;
     }
-    
-    if (error.message?.includes("permission") || error.message?.includes("403")) {
+
+    if (
+      error.message?.includes("permission") ||
+      error.message?.includes("403")
+    ) {
       return {
         success: false,
         error: "Vertex AI API not enabled or insufficient permissions. Check your Google Cloud console.",

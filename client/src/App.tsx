@@ -15,6 +15,12 @@ import Consumer from "@/pages/consumer";
 import Login from "@/pages/login";
 import Admin from "@/pages/admin";
 import MyTaste from "@/pages/my-taste";
+import AdminImport from "@/pages/admin-import";
+import PortfolioPage from "@/pages/portfolio";
+import FeedPage from "@/pages/feed";
+import MePage from "@/pages/me";
+import AgentLeadsPage from "@/pages/agent-leads";
+import StagingLab from "@/pages/StagingLab";
 
 function AgentLayout({ children }: { children: React.ReactNode }) {
   const style = {
@@ -62,6 +68,9 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Consumer} />
+      <Route path="/feed" component={FeedPage} />
+      <Route path="/me" component={MePage} />
+      <Route path="/staging" component={StagingLab} />
       <Route path="/login" component={Login} />
       <Route path="/agent">
         <ProtectedRoute>
@@ -78,11 +87,22 @@ function Router() {
           <AgentLayout><Settings /></AgentLayout>
         </ProtectedRoute>
       </Route>
+      <Route path="/agent/leads">
+        <ProtectedRoute>
+          <AgentLayout><AgentLeadsPage /></AgentLayout>
+        </ProtectedRoute>
+      </Route>
       <Route path="/admin">
         <ProtectedRoute>
           <AgentLayout><Admin /></AgentLayout>
         </ProtectedRoute>
       </Route>
+      <Route path="/admin/import">
+        <ProtectedRoute>
+          <AgentLayout><AdminImport /></AgentLayout>
+        </ProtectedRoute>
+      </Route>
+      <Route path="/portfolio/:agentId" component={PortfolioPage} />
       <Route path="/my-taste" component={MyTaste} />
       <Route path="/discover">
         <Redirect to="/" />

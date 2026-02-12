@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Settings, Sparkles, LogOut, Shield, Zap } from "lucide-react";
+import { LayoutDashboard, Building2, Settings, Sparkles, LogOut, Shield, Zap, Upload, Wand2 } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -20,6 +20,8 @@ import { Button } from "@/components/ui/button";
 const navItems = [
   { title: "Dashboard", url: "/agent", icon: LayoutDashboard },
   { title: "Listings", url: "/agent/listings", icon: Building2 },
+  { title: "Leads", url: "/agent/leads", icon: Shield },
+  { title: "Staging Lab", url: "/staging", icon: Wand2 },
   { title: "Settings", url: "/agent/settings", icon: Settings },
 ];
 
@@ -72,6 +74,16 @@ export function AppSidebar() {
                     <Link href="/admin" data-testid="nav-admin">
                       <Zap />
                       <span>God Mode</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+              {isAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild isActive={location === "/admin/import"}>
+                    <Link href="/admin/import" data-testid="nav-admin-import">
+                      <Upload />
+                      <span>Portfolio Import</span>
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>

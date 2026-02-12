@@ -260,7 +260,7 @@ export default function Listings() {
       location: property.location,
       images: property.images || [],
       status: property.status,
-      vibe: property.vibe || "Purist",
+      vibe: (property.vibe || "Purist") as PropertyFormValues["vibe"],
       agentId: property.agentId,
       tags: property.tags || [],
     });

@@ -1,6 +1,6 @@
-import { properties, leads, notifications, agents, organizations, syncRequests, swipes, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent, type Organization, type InsertOrganization, type SyncRequest, type InsertSyncRequest, type Swipe, type InsertSwipe } from "@shared/schema";
+import { properties, leads, notifications, agents, organizations, syncRequests, swipes, stagingResults, importJobs, buyers, swipeEvents, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent, type Organization, type InsertOrganization, type SyncRequest, type InsertSyncRequest, type Swipe, type InsertSwipe, type StagingResult, type InsertStagingResult, type ImportJob, type InsertImportJob, type Buyer, type InsertBuyer, type SwipeEvent, type InsertSwipeEvent } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, gte, lte, ilike, desc, sql } from "drizzle-orm";
+import { eq, and, gte, lte, ilike, desc, sql, inArray } from "drizzle-orm";
 
 export interface IStorage {
   getProperties(filters?: {
@@ -42,6 +42,22 @@ export interface IStorage {
   getSwipesBySession(sessionId: string): Promise<Swipe[]>;
   getRightSwipesBySession(sessionId: string): Promise<Swipe[]>;
   getSwipedPropertyIdsBySession(sessionId: string): Promise<number[]>;
+  createStagingResult(data: InsertStagingResult): Promise<StagingResult>;
+  getStagingResult(id: number): Promise<StagingResult | undefined>;
+  updateStagingResult(id: number, data: Partial<InsertStagingResult>): Promise<StagingResult | undefined>;
+  createImportJob(data: InsertImportJob): Promise<ImportJob>;
+  getImportJob(id: string): Promise<ImportJob | undefined>;
+  updateImportJob(id: string, data: Partial<InsertImportJob>): Promise<ImportJob | undefined>;
+  getPropertiesByAgent(agentId: string): Promise<Property[]>;
+  getPropertyByAgentAndSourceUrl(agentId: string, sourceUrl: string): Promise<Property | undefined>;
+  getPropertyByAgentAndLocation(agentId: string, location: string): Promise<Property | undefined>;
+  createBuyer(data: InsertBuyer): Promise<Buyer>;
+  getBuyer(id: string): Promise<Buyer | undefined>;
+  createSwipeEvent(data: InsertSwipeEvent): Promise<SwipeEvent>;
+  getSwipeEventsByBuyer(buyerId: string): Promise<SwipeEvent[]>;
+  getPropertiesByIds(ids: number[]): Promise<Property[]>;
+  getLeadByBuyerAndProperty(buyerId: string, propertyId: number): Promise<Lead | undefined>;
+  getAgentLeads(agentId: string): Promise<Lead[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -115,15 +131,9 @@ export class DatabaseStorage implements IStorage {
 
   async getLeads(organizationId?: number): Promise<Lead[]> {
     if (organizationId) {
-      return db.select({
-        id: leads.id,
-        propertyId: leads.propertyId,
-        name: leads.name,
-        phone: leads.phone,
-        createdAt: leads.createdAt,
-      }).from(leads)
-        .innerJoin(properties, eq(leads.propertyId, properties.id))
-        .where(eq(properties.organizationId, organizationId));
+      return db.select().from(leads).where(
+        sql`exists (select 1 from ${properties} p where p.id = ${leads.propertyId} and p.organization_id = ${organizationId})`
+      );
     }
     return db.select().from(leads);
   }
@@ -249,6 +259,104 @@ export class DatabaseStorage implements IStorage {
       .from(swipes)
       .where(eq(swipes.sessionId, sessionId));
     return rows.map(r => r.propertyId);
+  }
+
+  async createStagingResult(data: InsertStagingResult): Promise<StagingResult> {
+    const [result] = await db.insert(stagingResults).values(data).returning();
+    return result;
+  }
+
+  async getStagingResult(id: number): Promise<StagingResult | undefined> {
+    const [result] = await db.select().from(stagingResults).where(eq(stagingResults.id, id));
+    return result;
+  }
+
+  async updateStagingResult(id: number, data: Partial<InsertStagingResult>): Promise<StagingResult | undefined> {
+    const [updated] = await db.update(stagingResults).set(data).where(eq(stagingResults.id, id)).returning();
+    return updated;
+  }
+
+  async createImportJob(data: InsertImportJob): Promise<ImportJob> {
+    const [job] = await db.insert(importJobs).values(data).returning();
+    return job;
+  }
+
+  async getImportJob(id: string): Promise<ImportJob | undefined> {
+    const [job] = await db.select().from(importJobs).where(eq(importJobs.id, id));
+    return job;
+  }
+
+  async updateImportJob(id: string, data: Partial<InsertImportJob>): Promise<ImportJob | undefined> {
+    const [updated] = await db
+      .update(importJobs)
+      .set({ ...data, updatedAt: new Date() } as any)
+      .where(eq(importJobs.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getPropertiesByAgent(agentId: string): Promise<Property[]> {
+    return db.select().from(properties).where(eq(properties.agentId, agentId)).orderBy(desc(properties.id));
+  }
+
+  async getPropertyByAgentAndSourceUrl(agentId: string, sourceUrl: string): Promise<Property | undefined> {
+    const [property] = await db
+      .select()
+      .from(properties)
+      .where(and(eq(properties.agentId, agentId), eq(properties.sourceUrl, sourceUrl)));
+    return property;
+  }
+
+  async getPropertyByAgentAndLocation(agentId: string, location: string): Promise<Property | undefined> {
+    const [property] = await db
+      .select()
+      .from(properties)
+      .where(and(eq(properties.agentId, agentId), eq(properties.location, location)));
+    return property;
+  }
+
+  async createBuyer(data: InsertBuyer): Promise<Buyer> {
+    const [buyer] = await db.insert(buyers).values(data).returning();
+    return buyer;
+  }
+
+  async getBuyer(id: string): Promise<Buyer | undefined> {
+    const [buyer] = await db.select().from(buyers).where(eq(buyers.id, id));
+    return buyer;
+  }
+
+  async createSwipeEvent(data: InsertSwipeEvent): Promise<SwipeEvent> {
+    const [event] = await db.insert(swipeEvents).values(data).returning();
+    return event;
+  }
+
+  async getSwipeEventsByBuyer(buyerId: string): Promise<SwipeEvent[]> {
+    return db
+      .select()
+      .from(swipeEvents)
+      .where(eq(swipeEvents.buyerId, buyerId))
+      .orderBy(desc(swipeEvents.createdAt));
+  }
+
+  async getPropertiesByIds(ids: number[]): Promise<Property[]> {
+    if (ids.length === 0) return [];
+    return db.select().from(properties).where(inArray(properties.id, ids));
+  }
+
+  async getLeadByBuyerAndProperty(buyerId: string, propertyId: number): Promise<Lead | undefined> {
+    const [lead] = await db
+      .select()
+      .from(leads)
+      .where(and(eq(leads.buyerId, buyerId), eq(leads.propertyId, propertyId)));
+    return lead;
+  }
+
+  async getAgentLeads(agentId: string): Promise<Lead[]> {
+    return db
+      .select()
+      .from(leads)
+      .where(eq(leads.agentId, agentId))
+      .orderBy(desc(leads.matchScore), desc(leads.createdAt));
   }
 }
 

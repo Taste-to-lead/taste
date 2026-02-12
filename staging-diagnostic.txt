@@ -1,0 +1,1706 @@
+﻿Staging Diagnostic Report
+Generated: 2026-02-12 12:10:12
+Repo: taste-to-lead
+
+=====================================================================
+1) IMAGE GENERATION PROVIDERS: IMPORTS + USES
+=====================================================================
+
+[package.json] Provider dependencies
+```json
+    "@google-cloud/aiplatform": "^6.4.0",
+    "@google/generative-ai": "^0.24.1",
+```
+
+[server/vertexImagegen.ts]
+```ts
+import { PredictionServiceClient, helpers } from "@google-cloud/aiplatform";
+import type { protos } from "@google-cloud/aiplatform";
+
+const PROJECT_ID = "gen-lang-client-0912710356";
+const LOCATION = "us-central1";
+const MODEL = "imagen-3.0-generate-001";
+
+export interface ImageGenerationResult {
+  success: boolean;
+  imageData?: string; // Base64 encoded image
+  error?: string;
+  safetyBlocked?: boolean;
+}
+
+export async function generateStagedImage(
+  prompt: string,
+  _referenceImage?: string
+): Promise<ImageGenerationResult> {
+  try {
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (!credentialsPath) {
+      return {
+        success: false,
+        error: "GOOGLE_APPLICATION_CREDENTIALS not configured",
+      };
+    }
+
+    const client = new PredictionServiceClient({
+      keyFilename: credentialsPath,
+      apiEndpoint: "us-central1-aiplatform.googleapis.com",
+    });
+
+    const endpoint = `projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${MODEL}`;
+
+    // imagen-3.0-generate-001 is a text-to-image model.
+    // The Gemini analysis step already produces a detailed architectural prompt
+    // describing the room geometry, lighting, and target vibe â€” so text-to-image
+    // generates a faithful staged version.
+    const instance = helpers.toValue({
+      prompt,
+    }) as protos.google.protobuf.IValue;
+
+    const parameters = helpers.toValue({
+      sampleCount: 1,
+      aspectRatio: "4:3",
+    }) as protos.google.protobuf.IValue;
+
+    const request: protos.google.cloud.aiplatform.v1.IPredictRequest = {
+      endpoint,
+      instances: [instance],
+      parameters,
+    };
+
+    console.log(
+      `[VertexImagegen] Generating text-to-image for prompt (${prompt.length} chars)`
+    );
+
+    const response = await client.predict(request);
+
+    if (!response[0]?.predictions || response[0].predictions.length === 0) {
+      return {
+        success: false,
+        error: "No image generated â€” empty predictions array",
+      };
+    }
+
+    const prediction = response[0].predictions[0] as any;
+
+    // Check for safety filter blocks
+    if (prediction.structValue?.fields?.safetyAttributes) {
+      const safetyAttr = prediction.structValue.fields.safetyAttributes;
+      if (safetyAttr.structValue?.fields?.blocked?.boolValue === true) {
+        console.warn("[VertexImagegen] Image blocked by safety filter");
+        return {
+          success: false,
+          safetyBlocked: true,
+          error: "Image generation blocked by safety filter. Please try a different prompt or room description.",
+        };
+      }
+    }
+
+    // Imagen 3 returns the field as "bytesBase64Encoded"
+    const bytesValue =
+      prediction.structValue?.fields?.bytesBase64Encoded?.stringValue;
+    if (!bytesValue) {
+      // Log the available fields for debugging
+      const availableFields = prediction.structValue?.fields
+        ? Object.keys(prediction.structValue.fields)
+        : [];
+      console.error(
+        `[VertexImagegen] No image data in response. Available fields: ${JSON.stringify(availableFields)}`
+      );
+      return {
+        success: false,
+        error: `No image data in response. Fields found: ${availableFields.join(", ") || "none"}`,
+      };
+    }
+
+    console.log("[VertexImagegen] Image generated successfully");
+    return {
+      success: true,
+      imageData: bytesValue,
+    };
+  } catch (error: any) {
+    console.error("[VertexImagegen] Error:", error.message);
+
+    // Re-throw rate limit / quota errors so the retry wrapper can handle them
+    if (error.message?.includes("quota") || error.message?.includes("429") || error.message?.includes("Resource exhausted")) {
+      throw error;
+    }
+
+    if (
+      error.message?.includes("permission") ||
+      error.message?.includes("403")
+    ) {
+      return {
+        success: false,
+        error: "Vertex AI API not enabled or insufficient permissions. Check your Google Cloud console.",
+      };
+    }
+
+    return {
+      success: false,
+      error: `Image generation failed: ${error.message}`,
+    };
+  }
+}
+```
+
+[server/modules/staging/stagingProvider.ts]
+```ts
+import { generateStagedImage } from "../../vertexImagegen";
+
+export type ProviderGenerateInput = {
+  inputImageUrl: string;
+  prompt: string;
+  negativePrompt: string;
+};
+
+export type ProviderGenerateOutput = {
+  outputImageUrl: string;
+  providerMeta?: Record<string, unknown>;
+};
+
+async function urlToDataUrl(imageUrl: string): Promise<string | undefined> {
+  if (imageUrl.startsWith("data:image/")) return imageUrl;
+  if (!/^https?:\/\//i.test(imageUrl)) return undefined;
+  const response = await fetch(imageUrl);
+  if (!response.ok) return undefined;
+  const mimeType = response.headers.get("content-type") || "image/jpeg";
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  return `data:${mimeType};base64,${base64}`;
+}
+
+export async function generateStagedImageWithProvider(
+  input: ProviderGenerateInput
+): Promise<ProviderGenerateOutput> {
+  const referenceImage = await urlToDataUrl(input.inputImageUrl);
+  const mergedPrompt = `${input.prompt}\n\nNegative prompt constraints: ${input.negativePrompt}`;
+  const result = await generateStagedImage(mergedPrompt, referenceImage);
+  if (!result.success || !result.imageData) {
+    throw new Error(result.error || "staging_generation_failed");
+  }
+  return {
+    outputImageUrl: `data:image/png;base64,${result.imageData}`,
+    providerMeta: {
+      safetyBlocked: result.safetyBlocked || false,
+    },
+  };
+}
+```
+
+[server/geminiTagger.ts]
+```ts
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { VIBES, VIBE_DEFINITIONS } from "@shared/tasteAlgorithm";
+
+const VALID_ARCHETYPES = VIBES;
+export type Archetype = (typeof VALID_ARCHETYPES)[number] | "Unclassified";
+
+const orderedVibes = [
+  "Monarch",
+  "Industrialist",
+  "Purist",
+  "Naturalist",
+  "Futurist",
+  "Curator",
+  "Nomad",
+  "Classicist",
+] as const;
+
+const archetypeSpec = orderedVibes
+  .map((name, idx) => {
+    const def = VIBE_DEFINITIONS[name];
+    return `${idx + 1}. ${name.toUpperCase()}
+   Keywords: "${def.keywords.join('", "')}"
+   Visuals: ${def.visualCues.join(", ")}
+   Psychology: ${def.psychology.join(", ")}`;
+  })
+  .join("\n\n");
+
+const VIBE_BIBLE_PROMPT = `You are the "Vibe Bible" - a strict real estate archetype classifier. Analyze the property listing (image and/or description) and classify it into exactly ONE of the 8 mutually exclusive archetypes below.
+
+THE 8 ARCHETYPES (Mutually Exclusive):
+
+${archetypeSpec}
+
+RULES:
+- Select the SINGLE best-fit archetype from the 8 above.
+- Match based on keywords in the listing text AND visual cues in the image.
+- If ambiguous and the property has vibrant colors or bold art, default to "Curator".
+- If ambiguous and the property has neutral/traditional elements, default to "Classicist".
+- Return ONLY the single archetype word (e.g. "Monarch"). No explanation, no punctuation.`;
+
+export async function classifyPropertyImage(imageUrl: string): Promise<Archetype> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.warn("[GeminiTagger] GEMINI_API_KEY not set, defaulting to Unclassified");
+    return "Unclassified";
+  }
+
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+    let result;
+
+    if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+      const response = await fetch(imageUrl);
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString("base64");
+      const mimeType = response.headers.get("content-type") || "image/jpeg";
+
+      result = await model.generateContent([
+        VIBE_BIBLE_PROMPT,
+        {
+          inlineData: {
+            data: base64,
+            mimeType,
+          },
+        },
+      ]);
+    } else {
+      result = await model.generateContent([
+        `${VIBE_BIBLE_PROMPT}\n\nThe property has no image available. Classify based on this description: "${imageUrl}"`,
+      ]);
+    }
+
+    const text = result.response.text().trim();
+    const matched = VALID_ARCHETYPES.find(
+      (a) => a.toLowerCase() === text.toLowerCase()
+    );
+
+    if (matched) {
+      console.log(`[GeminiTagger] Vibe Bible classified as: ${matched}`);
+      return matched;
+    }
+
+    const partialMatch = VALID_ARCHETYPES.find((a) =>
+      text.toLowerCase().includes(a.toLowerCase())
+    );
+    if (partialMatch) {
+      console.log(`[GeminiTagger] Vibe Bible partial match: ${partialMatch}`);
+      return partialMatch;
+    }
+
+    console.warn(`[GeminiTagger] Unexpected response: "${text}", defaulting to Classicist`);
+    return "Classicist";
+  } catch (error: any) {
+    console.error(`[GeminiTagger] Error: ${error.message}, defaulting to Unclassified`);
+    return "Unclassified";
+  }
+}
+```
+
+[server/webScraper.ts]
+```ts
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { classifyPropertyImage } from "./geminiTagger";
+import { storage } from "./storage";
+
+interface ExtractedProperty {
+  title: string;
+  description: string;
+  price: number;
+  bedrooms: number;
+  bathrooms: number;
+  sqft: number;
+  location: string;
+  images: string[];
+}
+
+const EXTRACTION_PROMPT = `You are a real estate data extractor. Analyze the provided content and extract ALL property listings you can find.
+
+For EACH property listing found, extract:
+- title: The property name or headline
+- description: A detailed description (generate one from available info if not explicit)
+- price: The listing price as a number (no currency symbols). If not found, estimate based on location/size.
+- bedrooms: Number of bedrooms (default 3 if not found)
+- bathrooms: Number of bathrooms (default 2 if not found)
+- sqft: Square footage (estimate from bedrooms if not found: 1bed=800, 2bed=1200, 3bed=1800, 4bed=2500, 5+bed=3500)
+- location: Full address or city/state
+- images: Array of full image URLs related to this property (must start with https://)
+
+IMPORTANT RULES:
+- Extract real data from the page. Do NOT make up listings that aren't there.
+- If this is a single property page, extract that one property.
+- If this is a listings page with multiple properties, extract all of them (up to 20).
+- Make sure image URLs are absolute (start with https://).
+- If you cannot find any real property listings, return an empty array [].
+
+Return ONLY a valid JSON array. No markdown, no code fences, no explanation.
+Example: [{"title":"Beautiful Home","description":"A lovely 3 bedroom...","price":500000,"bedrooms":3,"bathrooms":2,"sqft":1800,"location":"Austin, TX","images":["https://example.com/img.jpg"]}]`;
+
+function isUrlSafe(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const hostname = parsed.hostname.toLowerCase();
+    const blocked = ["localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254", "metadata.google.internal"];
+    if (blocked.includes(hostname)) return false;
+    if (hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
+    if (/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchPageContent(url: string): Promise<string | null> {
+  if (!isUrlSafe(url)) {
+    console.log("[WebScraper] URL blocked by SSRF protection");
+    return null;
+  }
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      console.log(`[WebScraper] Direct fetch failed: ${response.status}, falling back to Gemini URL analysis`);
+      return null;
+    }
+    const html = await response.text();
+
+    let text = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "");
+
+    const imgUrls: string[] = [];
+    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    let match;
+    while ((match = imgRegex.exec(html)) !== null) {
+      const src = match[1];
+      if (src && (src.startsWith("http") || src.startsWith("//"))) {
+        imgUrls.push(src.startsWith("//") ? "https:" + src : src);
+      }
+    }
+
+    const ogImages: string[] = [];
+    const ogRegex = /<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["']/gi;
+    while ((match = ogRegex.exec(html)) !== null) {
+      if (match[1]) ogImages.push(match[1]);
+    }
+
+    text = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (text.length > 12000) text = text.substring(0, 12000);
+
+    const allImages = [...ogImages, ...imgUrls].slice(0, 20);
+    const imgSection = allImages.length > 0
+      ? `\n\nIMAGE URLS FOUND ON PAGE:\n${allImages.join("\n")}`
+      : "";
+
+    return text + imgSection;
+  } catch (err: any) {
+    console.log(`[WebScraper] Direct fetch error: ${err.message}, falling back to Gemini URL analysis`);
+    return null;
+  }
+}
+
+async function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function extractWithGemini(pageContent: string | null, sourceUrl: string): Promise<ExtractedProperty[]> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+  let prompt: string;
+
+  if (pageContent) {
+    prompt = `${EXTRACTION_PROMPT}\n\nSource URL: ${sourceUrl}\n\nWEBPAGE CONTENT:\n${pageContent}`;
+  } else {
+    prompt = `${EXTRACTION_PROMPT}\n\nI need you to analyze this real estate listing URL and extract property data from it. The URL is: ${sourceUrl}\n\nPlease visit/analyze this URL and extract the property listing information. If you know this website and the URL pattern, use your knowledge to extract the property details. For image URLs, construct them based on the website's typical URL patterns if possible.`;
+  }
+
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      const text = result.response.text().trim();
+
+      let jsonStr = text;
+      const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fenceMatch) jsonStr = fenceMatch[1].trim();
+
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (!Array.isArray(parsed)) return [parsed];
+        return parsed;
+      } catch {
+        console.error("[WebScraper] Failed to parse Gemini response:", jsonStr.substring(0, 300));
+        throw new Error("Failed to parse property data from the webpage. The page may not contain recognizable property listings.");
+      }
+    } catch (err: any) {
+      if (err.message?.includes("429") && attempt < maxRetries - 1) {
+        const waitTime = (attempt + 1) * 30000;
+        console.log(`[WebScraper] Gemini rate limited, retrying in ${waitTime / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
+        await sleep(waitTime);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Gemini API request failed after retries");
+}
+
+async function validateImageUrl(url: string): Promise<boolean> {
+  try {
+    const resp = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5000) });
+    const ct = resp.headers.get("content-type") || "";
+    return resp.ok && (ct.startsWith("image/") || ct.includes("octet-stream"));
+  } catch {
+    return false;
+  }
+}
+
+export async function importFromUrl(
+  syncRequestId: number,
+  websiteUrl: string,
+  agentId: string,
+  organizationId: number | null
+): Promise<{ importedCount: number; error?: string }> {
+  try {
+    await storage.updateSyncRequest(syncRequestId, { status: "processing" });
+    console.log(`[WebScraper] Starting import from: ${websiteUrl}`);
+
+    const pageContent = await fetchPageContent(websiteUrl);
+    const extracted = await extractWithGemini(pageContent, websiteUrl);
+    console.log(`[WebScraper] Gemini extracted ${extracted.length} properties`);
+
+    if (extracted.length === 0) {
+      await storage.updateSyncRequest(syncRequestId, {
+        status: "completed",
+        importedCount: 0,
+        errorMessage: "No property listings found on this page",
+      });
+      return { importedCount: 0, error: "No property listings found on this page" };
+    }
+
+    let importedCount = 0;
+
+    for (const prop of extracted) {
+      try {
+        const rawImages = (prop.images || [])
+          .filter((img: string) => typeof img === "string" && img.startsWith("http"));
+
+        const validImages: string[] = [];
+        for (const img of rawImages.slice(0, 5)) {
+          const valid = await validateImageUrl(img);
+          if (valid) validImages.push(img);
+        }
+
+        const tagSource = validImages[0] || prop.description || prop.title || "modern home";
+        const vibeTag = await classifyPropertyImage(tagSource);
+
+        const title = prop.title || "Imported Property";
+        const propertyData = {
+          title,
+          description: prop.description || "Imported from " + websiteUrl,
+          price: prop.price || 500000,
+          bedrooms: prop.bedrooms || 3,
+          bathrooms: prop.bathrooms || 2,
+          sqft: prop.sqft || 1800,
+          location: prop.location || "Unknown",
+          images: validImages,
+          agentId,
+          status: "active",
+          vibe: vibeTag === "Unclassified" ? "Classicist" : vibeTag,
+          vibeTag,
+          tags: [] as string[],
+          organizationId,
+        };
+
+        await storage.createProperty(propertyData);
+        importedCount++;
+        console.log(`[WebScraper] Imported: ${title} [${vibeTag}]`);
+      } catch (propError: any) {
+        console.error(`[WebScraper] Failed to import property: ${prop.title}`, propError.message);
+      }
+    }
+
+    await storage.updateSyncRequest(syncRequestId, {
+      status: "completed",
+      importedCount,
+    });
+
+    console.log(`[WebScraper] Import complete: ${importedCount}/${extracted.length} properties`);
+    return { importedCount };
+  } catch (error: any) {
+    console.error(`[WebScraper] Import failed:`, error.message);
+    let friendlyError = error.message;
+    if (error.message?.includes("429")) {
+      friendlyError = "AI service temporarily busy. Please try again in a minute.";
+    } else if (error.message?.includes("GEMINI_API_KEY")) {
+      friendlyError = "AI service not configured. Contact support.";
+    }
+    await storage.updateSyncRequest(syncRequestId, {
+      status: "failed",
+      errorMessage: friendlyError,
+    });
+    return { importedCount: 0, error: friendlyError };
+  }
+}
+```
+
+[server/routes.ts] Imports + GCS auth config + staging/Gemini generation route functions
+```ts
+import { createServer, type Server } from "http";
+import path from "path";
+import crypto from "crypto";
+import { storage } from "./storage";
+import { db } from "./db";
+import { insertPropertySchema, insertLeadSchema, swipeSchema, loginSchema, signupSchema, sendVerificationSchema, verifyCodeSchema, verificationCodes } from "@shared/schema";
+import { eq, and, gt } from "drizzle-orm";
+import { sendEmail, buildMatchEmailHtml } from "./notificationService";
+import { classifyPropertyImage } from "./geminiTagger";
+import { importFromUrl } from "./webScraper";
+import { generateStagedImage } from "./vertexImagegen";
+import { VIBES, VIBE_DEFINITIONS, computeMatchScore, computeTasteScore, buildStagingPrompt, computeBuyerVibeVector, computeVectorMatchScore, type Vibe, type BuyerSwipeAction } from "@shared/tasteAlgorithm";
+import { extractListingsFromPortfolioUrl, parseCsvMultipart, runPortfolioImportJob, csvRowsToListings, URL_IMPORT_FAIL_MESSAGE } from "./portfolioImport";
+import { registerStagingRoutes } from "./modules/staging/stagingRoutes";
+import bcrypt from "bcryptjs";
+import { Storage } from "@google-cloud/storage";
+import { z } from "zod";
+
+const SUPER_ADMIN_EMAIL = "vinnysladeb@gmail.com";
+const GCS_BUCKET_NAME = "taste-to-lead-assets";
+
+// Initialize Google Cloud Storage
+let gcsClient: Storage | null = null;
+try {
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (credentialsPath) {
+    gcsClient = new Storage({
+      keyFilename: credentialsPath,
+      projectId: "gen-lang-client-0912710356",
+    });
+  }
+} catch (err) {
+  console.warn("[GCS] Failed to initialize Storage client:", err);
+}
+
+// Upload base64 image to Google Cloud Storage and return public URL
+async function uploadImageToGCS(base64Data: string, filename: string): Promise<string | null> {
+  try {
+    if (!gcsClient) {
+      console.error("[GCS] Storage client not initialized");
+      return null;
+    }
+
+    const bucket = gcsClient.bucket(GCS_BUCKET_NAME);
+    const file = bucket.file(filename);
+
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64Data, "base64");
+
+    // Upload to GCS with public-read ACL
+    await file.save(buffer, {
+      metadata: {
+        contentType: "image/png",
+      },
+      public: true,
+    });
+
+    // Return public URL
+    const publicUrl = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/${filename}`;
+    console.log(`[GCS] Image uploaded successfully: ${publicUrl}`);
+    return publicUrl;
+  } catch (error: any) {
+    console.error("[GCS] Upload failed:", error.message);
+    return null;
+  }
+}
+
+// â”€â”€ Sequential queue to prevent API rate limits â”€â”€
+// Ensures only one Gemini/Vertex call runs at a time with delays between them.
+class ApiQueue {
+  private queue: Array<() => Promise<void>> = [];
+  private running = false;
+  private delayMs: number;
+
+  constructor(delayMs = 2000) {
+    this.delayMs = delayMs;
+  }
+
+  enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+
+      res.json(allProps);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/admin/listing/:id/delete", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const deleted = await storage.deleteProperty(id);
+      if (!deleted) {
+        return res.status(404).json({ message: "Listing not found" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/admin/staging-hooks", requireAdmin, async (req, res) => {
+    const archetypes = VIBES.map((name) => ({
+      name,
+      keywords: VIBE_DEFINITIONS[name].keywords.join(", "),
+      psychology: VIBE_DEFINITIONS[name].psychology.join(", "),
+    }));
+
+    try {
+      const { roomDescription } = req.body;
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        const fallbackHooks = archetypes.map(a => ({
+          archetype: a.name,
+          hook: `Experience this space reimagined through the ${a.name} lens â€” where ${a.psychology.toLowerCase()} meets inspired design.`,
+        }));
+        return res.json({ hooks: fallbackHooks });
+      }
+
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+      const prompt = `You are a luxury real estate copywriter. Generate a short, compelling "Selling Hook" (1-2 sentences max) for each of these 8 interior design archetypes applied to a room.${roomDescription ? ` The room is described as: "${roomDescription}".` : ""} 
+
+For each archetype, write a hook that would make a buyer emotionally connect with the staged version.
+
+Return ONLY a valid JSON array with exactly 8 objects, each with "archetype" and "hook" keys. No markdown, no code fences.
+
+The 8 archetypes:
+${archetypes.map(a => `- ${a.name}: ${a.keywords}. Psychology: ${a.psychology}`).join("\n")}`;
+
+      // Queue the Gemini call and retry on rate limits
+      const text = await geminiQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log("[StagingHooks] Queued Gemini call starting...");
+          const result = await model.generateContent(prompt);
+          return result.response.text().trim();
+        })
+      );
+
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const hooks = JSON.parse(jsonMatch[0]);
+          if (Array.isArray(hooks) && hooks.length > 0 && hooks[0].archetype && hooks[0].hook) {
+            return res.json({ hooks });
+          }
+        } catch {
+          console.warn("[StagingHooks] Failed to parse Gemini JSON, using fallbacks");
+        }
+      }
+
+      const fallbackHooks = archetypes.map(a => ({
+        archetype: a.name,
+        hook: `Experience this space reimagined through the ${a.name} lens â€” where ${a.psychology.toLowerCase()} meets inspired design.`,
+      }));
+      res.json({ hooks: fallbackHooks });
+    } catch (error: any) {
+      console.error("[StagingHooks] Error:", error.message);
+      if (error.message?.includes("429") || error.message?.includes("quota")) {
+        const fallbackHooks = archetypes.map(a => ({
+          archetype: a.name,
+          hook: `Experience this space reimagined through the ${a.name} lens â€” where ${a.psychology.toLowerCase()} meets inspired design.`,
+        }));
+        return res.json({ hooks: fallbackHooks });
+      }
+      res.status(500).json({ message: "Failed to generate selling hooks" });
+    }
+  });
+
+  app.post("/api/admin/staging-analyze", requireAdmin, async (req, res) => {
+    try {
+      const { imageData, targetVibe } = req.body;
+      if (!imageData || !targetVibe) {
+        return res.status(400).json({ message: "Image data and target vibe are required" });
+      }
+
+      if (!VIBES.includes(targetVibe as Vibe)) {
+        return res.status(400).json({ message: `Unknown vibe: ${targetVibe}` });
+      }
+      const resolvedVibe = targetVibe as Vibe;
+      const vibeDef = VIBE_DEFINITIONS[resolvedVibe];
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({ message: "Gemini API key not configured" });
+      }
+
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+      const architectPrompt = `ACT AS: A Senior Interior Architect and staging planner.
+
+TASK: Analyze the provided image of an empty room and return a concise room brief.
+
+Return exactly one paragraph, no bullet points, containing:
+- room type
+- camera perspective
+- flooring material
+- light direction and intensity
+- major architectural elements that must stay fixed
+- empty/negative space zones suitable for furniture
+
+Keep it concrete and visual. Vibe target: ${resolvedVibe}.
+Vibe cues: ${vibeDef.promptSeeds.join(", ")}.
+Do: ${vibeDef.stagingStyleRules.do.join("; ")}.
+Do not: ${vibeDef.stagingStyleRules.dont.join("; ")}.`;
+
+      const base64Match = imageData.match(/^data:image\/\w+;base64,(.+)$/);
+      if (!base64Match) {
+        return res.status(400).json({ message: "Invalid image data format" });
+      }
+
+      const mimeMatch = imageData.match(/^data:(image\/\w+);base64,/);
+      const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+
+      // Queue the Gemini call and retry on rate limits
+      const roomBrief = await geminiQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log(`[StagingAnalyze] Queued Gemini call for ${resolvedVibe} starting...`);
+          const result = await model.generateContent([
+            { inlineData: { mimeType, data: base64Match[1] } },
+            architectPrompt,
+          ]);
+          return result.response.text().trim();
+        })
+      );
+
+      const prompt = buildStagingPrompt({
+        vibe: resolvedVibe,
+        roomDescription: roomBrief,
+        constraints: [
+          "interior designer only",
+          "no renovation",
+          "no carpentry",
+          "no layout change",
+        ],
+      });
+
+      console.log(`[StagingAnalyze] Generated ${resolvedVibe} prompt (${prompt.length} chars)`);
+      // Return both the prompt and the original image data for use in image-to-image generation
+      res.json({ prompt, vibe: resolvedVibe, referenceImage: imageData });
+    } catch (error: any) {
+      console.error("[StagingAnalyze] Error:", error.message);
+      if (error.message?.includes("429") || error.message?.includes("quota") || error.message?.includes("Resource exhausted")) {
+        return res.status(429).json({ message: "Gemini API rate limit hit. The request has been retried automatically but the quota is still exhausted. Please wait a minute and try again." });
+      }
+      res.status(500).json({ message: "Failed to analyze room" });
+    }
+  });
+
+  app.post("/api/admin/staging-generate", requireAdmin, async (req, res) => {
+    try {
+      const { prompt, vibe, referenceImage, propertyId } = req.body;
+      if (!prompt || !propertyId) {
+        return res.status(400).json({ message: "Prompt and propertyId are required" });
+      }
+      const promptVibe = VIBES.includes(vibe as Vibe) ? (vibe as Vibe) : "Classicist";
+      const normalizedPrompt = buildStagingPrompt({
+        vibe: promptVibe,
+        roomDescription: String(prompt),
+        constraints: [
+          "interior designer only",
+          "no renovation",
+          "no carpentry",
+          "no layout change",
+        ],
+      });
+
+      // Create a staging result record immediately with status "processing"
+      const stagingRecord = await storage.createStagingResult({
+        propertyId,
+        vibe: promptVibe,
+        status: "processing",
+        progressStep: "Analyzing Room",
+      });
+
+      console.log(`[StagingGenerate] Job ${stagingRecord.id} started for property ${propertyId}, vibe: ${promptVibe}`);
+
+      // Return immediately to the client - don't await the AI call
+      res.json({
+        success: true,
+        message: "Job Started",
+        resultId: stagingRecord.id,
+        vibe: promptVibe,
+      });
+
+      // Fire and forget: Process the image generation in the background
+      processImageGenerationJob(stagingRecord.id, normalizedPrompt, promptVibe, referenceImage).catch((error) => {
+        console.error(`[StagingGenerate] Background job ${stagingRecord.id} failed:`, error);
+      });
+    } catch (error: any) {
+      console.error("[StagingGenerate] Error:", error.message);
+      res.status(500).json({ message: "Failed to create staging job" });
+    }
+  });
+
+  // Background worker for image generation
+  async function processImageGenerationJob(
+    resultId: number,
+    prompt: string,
+    vibe: string,
+    referenceImage: string
+  ): Promise<void> {
+    try {
+      // Update progress: Analyzing Room
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Analyzing Room",
+        status: "processing",
+      });
+
+      console.log(`[StagingWorker] Job ${resultId} - Analyzing room...`);
+
+      // Call the image generation
+      console.log(`[StagingWorker] Job ${resultId} - Calling Vertex AI...`);
+
+      // Update progress: Rendering
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Rendering Lighting",
+      });
+
+      // Queue the Vertex AI call so only one runs at a time, with retry on rate limits
+      const result = await vertexQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log(`[StagingWorker] Job ${resultId} - Queued Vertex AI call starting...`);
+          return generateStagedImage(prompt, referenceImage);
+        })
+      );
+
+      if (!result.success) {
+        // Update status: failed
+        await storage.updateStagingResult(resultId, {
+          status: "failed",
+          progressStep: "Failed",
+          errorMessage: result.error || "Unknown error during generation",
+        });
+
+        console.error(`[StagingWorker] Job ${resultId} - Generation failed: ${result.error}`);
+        return;
+      }
+
+      // Update progress: Uploading to storage
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Uploading to Storage",
+      });
+
+      // Upload image to Google Cloud Storage
+      const filename = `staging-${resultId}-${vibe}-${Date.now()}.png`;
+      const publicUrl = await uploadImageToGCS(result.imageData!, filename);
+
+      if (!publicUrl) {
+        // Upload failed, but generation succeeded - store as fallback data URL
+        console.warn(`[StagingWorker] Job ${resultId} - GCS upload failed, using fallback base64 data URL`);
+        const fallbackUrl = `data:image/png;base64,${result.imageData}`;
+        await storage.updateStagingResult(resultId, {
+          status: "completed",
+          progressStep: "Finalizing",
+          imageUrl: fallbackUrl,
+        });
+        return;
+      }
+
+      // Update status: completed with GCS URL
+      await storage.updateStagingResult(resultId, {
+        status: "completed",
+        progressStep: "Finalizing",
+        imageUrl: publicUrl,
+      });
+
+      console.log(`[StagingWorker] Job ${resultId} - Generation completed successfully with GCS URL`);
+    } catch (error: any) {
+      console.error(`[StagingWorker] Job ${resultId} - Unexpected error:`, error.message);
+
+      try {
+        await storage.updateStagingResult(resultId, {
+          status: "failed",
+          progressStep: "Failed",
+          errorMessage: error.message || "Unexpected error",
+        });
+      } catch (updateError) {
+        console.error(`[StagingWorker] Job ${resultId} - Failed to update error status:`, updateError);
+      }
+    }
+  }
+
+  app.get("/api/admin/staging-status/:resultId", requireAdmin, async (req, res) => {
+    try {
+      const resultId = parseInt(req.params.resultId as string);
+      if (isNaN(resultId)) {
+        return res.status(400).json({ message: "Invalid resultId" });
+      }
+
+      const result = await storage.getStagingResult(resultId);
+      if (!result) {
+        return res.status(404).json({ message: "Staging result not found" });
+      }
+
+      res.json({
+        id: result.id,
+        status: result.status,
+        progressStep: result.progressStep,
+        vibe: result.vibe,
+        imageUrl: result.imageUrl,
+        errorMessage: result.errorMessage,
+        createdAt: result.createdAt,
+      });
+    } catch (error: any) {
+      console.error("[StagingStatus] Error:", error.message);
+      res.status(500).json({ message: "Failed to fetch staging status" });
+    }
+  });
+
+  app.post("/api/webhooks/lemon-squeezy", async (req, res) => {
+    try {
+      const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET;
+      if (!secret) {
+        console.error("[LemonSqueezy] LEMONSQUEEZY_WEBHOOK_SECRET not set");
+        return res.status(500).json({ message: "Webhook secret not configured" });
+      }
+
+      const signature = req.headers["x-signature"] as string;
+      if (!signature) {
+        return res.status(401).json({ message: "Missing signature" });
+      }
+
+      const rawBody = req.rawBody;
+      if (!rawBody) {
+        return res.status(400).json({ message: "Missing request body" });
+      }
+
+```
+
+[server/modules/staging/stagingRoutes.ts]
+```ts
+import crypto from "crypto";
+import type { Express, Request } from "express";
+import { eq } from "drizzle-orm";
+import { Storage } from "@google-cloud/storage";
+import { db } from "../../db";
+import { stagingJobs } from "@shared/schema";
+import { VIBES } from "@shared/tasteAlgorithm";
+import { buildStagingPrompt } from "./promptBuilder";
+import { stagingQueue } from "./stagingQueue";
+import type { RoomType, VibeId } from "./stagingTypes";
+
+type MultipartFile = {
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+};
+
+const ROOM_TYPES: RoomType[] = ["living", "bed", "kitchen", "bath", "office", "dining", "other"];
+
+async function parseMultipart(req: Request): Promise<{ fields: Record<string, string>; file: MultipartFile }> {
+  const contentType = req.headers["content-type"] || "";
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!boundaryMatch) throw new Error("Missing multipart boundary");
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => resolve());
+    req.on("error", reject);
+  });
+
+  const raw = Buffer.concat(chunks).toString("latin1");
+  const parts = raw.split(`--${boundary}`).slice(1, -1);
+  const fields: Record<string, string> = {};
+  let file: MultipartFile | null = null;
+
+  for (const rawPart of parts) {
+    const part = rawPart.startsWith("\r\n") ? rawPart.slice(2) : rawPart;
+    const separatorIndex = part.indexOf("\r\n\r\n");
+    if (separatorIndex < 0) continue;
+
+    const headers = part.slice(0, separatorIndex);
+    let body = part.slice(separatorIndex + 4);
+    if (body.endsWith("\r\n")) body = body.slice(0, -2);
+
+    const nameMatch = headers.match(/name="([^"]+)"/i);
+    if (!nameMatch) continue;
+    const fieldName = nameMatch[1];
+    const fileNameMatch = headers.match(/filename="([^"]*)"/i);
+
+    if (fileNameMatch) {
+      const mimeTypeMatch = headers.match(/Content-Type:\s*([^\r\n]+)/i);
+      file = {
+        filename: fileNameMatch[1] || "upload",
+        mimeType: (mimeTypeMatch?.[1] || "application/octet-stream").trim(),
+        data: Buffer.from(body, "latin1"),
+      };
+    } else {
+      fields[fieldName] = Buffer.from(body, "latin1").toString("utf8").trim();
+    }
+  }
+
+  if (!file || !file.data || file.data.length === 0) {
+    throw new Error("Image file is required");
+  }
+
+  return { fields, file };
+}
+
+function mimeToExt(mimeType: string): string {
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
+  return "bin";
+}
+
+async function uploadInputImage(file: MultipartFile, batchId: string): Promise<string> {
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (credentialsPath) {
+    try {
+      const bucketName = process.env.STAGING_BUCKET || "taste-to-lead-assets";
+      const gcs = new Storage({
+        keyFilename: credentialsPath,
+        projectId: process.env.GCLOUD_PROJECT || "gen-lang-client-0912710356",
+      });
+      const ext = mimeToExt(file.mimeType);
+      const filename = `staging-input-${batchId}-${Date.now()}.${ext}`;
+      await gcs.bucket(bucketName).file(filename).save(file.data, {
+        metadata: { contentType: file.mimeType },
+        public: true,
+      });
+      return `https://storage.googleapis.com/${bucketName}/${filename}`;
+    } catch (error) {
+      console.warn("[StagingRoutes] GCS upload failed, falling back to data URL:", error);
+    }
+  }
+  return `data:${file.mimeType};base64,${file.data.toString("base64")}`;
+}
+
+export function registerStagingRoutes(app: Express): void {
+  app.post("/api/staging/stage", async (req, res) => {
+    try {
+      const { fields, file } = await parseMultipart(req);
+      const roomType = fields.roomType as RoomType;
+      if (!ROOM_TYPES.includes(roomType)) {
+        return res.status(400).json({ message: "roomType is required and must be valid" });
+      }
+
+      const strictness = fields.strictness === "strict" ? "strict" : "normal";
+      const batchId = crypto.randomUUID();
+      const inputImageUrl = await uploadInputImage(file, batchId);
+      const listingId = fields.listingId ? parseInt(fields.listingId, 10) : null;
+      const agentId = fields.agentId || null;
+      const buyerId = fields.buyerId || null;
+      const roomNotes = fields.roomNotes || "";
+
+      const jobs: Array<{ jobId: string; vibeId: VibeId; status: string }> = [];
+
+      for (const vibeId of VIBES) {
+        const jobId = crypto.randomUUID();
+        const built = buildStagingPrompt({
+          vibeId,
+          roomType,
+          optionalRoomNotes: roomNotes,
+          strictness,
+        });
+
+        await db.insert(stagingJobs).values({
+          id: jobId,
+          batchId,
+          agentId,
+          buyerId,
+          listingId,
+          vibeId,
+          roomType,
+          inputImageUrl,
+          status: "queued",
+          outputImageUrl: null,
+          promptUsed: built.prompt,
+          negativePromptUsed: built.negativePrompt,
+          qualityFlags: [],
+          error: null,
+        } as any);
+
+        stagingQueue.enqueue({
+          jobId,
+          inputImageUrl,
+          prompt: built.prompt,
+          negativePrompt: built.negativePrompt,
+          vibeId,
+        });
+
+        jobs.push({ jobId, vibeId, status: "queued" });
+      }
+
+      res.status(202).json({ batchId, jobs });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message || "Failed to start staging batch" });
+    }
+  });
+
+  app.get("/api/staging/batch/:batchId", async (req, res) => {
+    try {
+      const rows = await db.select().from(stagingJobs).where(eq(stagingJobs.batchId, req.params.batchId));
+      const jobs = rows.map((job) => ({
+        jobId: job.id,
+        vibeId: job.vibeId,
+        status: job.status,
+        outputImageUrl: job.outputImageUrl,
+        qualityFlags: job.qualityFlags || [],
+        error: job.error,
+      }));
+      res.json({ batchId: req.params.batchId, jobs });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/staging/job/:jobId", async (req, res) => {
+    try {
+      const rows = await db.select().from(stagingJobs).where(eq(stagingJobs.id, req.params.jobId));
+      const job = rows[0];
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      res.json(job);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+}
+```
+
+[server/modules/staging/stagingQueue.ts]
+```ts
+import crypto from "crypto";
+import { eq } from "drizzle-orm";
+import { db } from "../../db";
+import { stagingAssets, stagingJobs } from "@shared/schema";
+import { assessOutputMetadataIfAvailable, assessPromptForBannedTerms } from "./stagingQualityGate";
+import { generateStagedImageWithProvider } from "./stagingProvider";
+import type { StagingJobStatus } from "./stagingTypes";
+
+type QueueJob = {
+  jobId: string;
+  inputImageUrl: string;
+  prompt: string;
+  negativePrompt: string;
+  vibeId: string;
+};
+
+type JobState = {
+  status: StagingJobStatus;
+  updatedAt: number;
+  error?: string;
+  qualityFlags?: string[];
+};
+
+class StagingQueue {
+  private readonly concurrency: number;
+  private running = 0;
+  private queue: QueueJob[] = [];
+  private readonly jobState = new Map<string, JobState>();
+
+  constructor(concurrency = 2) {
+    this.concurrency = concurrency;
+  }
+
+  enqueue(job: QueueJob): string {
+    this.jobState.set(job.jobId, { status: "queued", updatedAt: Date.now() });
+    this.queue.push(job);
+    this.pump();
+    return job.jobId;
+  }
+
+  getJobState(jobId: string): JobState | undefined {
+    return this.jobState.get(jobId);
+  }
+
+  private pump(): void {
+    while (this.running < this.concurrency && this.queue.length > 0) {
+      const next = this.queue.shift()!;
+      this.running++;
+      this.process(next)
+        .catch((error) => {
+          console.error("[StagingQueue] process error:", error);
+        })
+        .finally(() => {
+          this.running--;
+          this.pump();
+        });
+    }
+  }
+
+  private async updateJob(jobId: string, patch: {
+    status?: StagingJobStatus;
+    outputImageUrl?: string | null;
+    qualityFlags?: string[] | null;
+    error?: string | null;
+    negativePromptUsed?: string;
+  }): Promise<void> {
+    const current = this.jobState.get(jobId);
+    this.jobState.set(jobId, {
+      status: patch.status || current?.status || "queued",
+      updatedAt: Date.now(),
+      error: patch.error || undefined,
+      qualityFlags: patch.qualityFlags || undefined,
+    });
+    await db
+      .update(stagingJobs)
+      .set({
+        ...patch,
+        updatedAt: new Date(),
+      } as any)
+      .where(eq(stagingJobs.id, jobId));
+  }
+
+  private async process(job: QueueJob): Promise<void> {
+    await this.updateJob(job.jobId, { status: "running", error: null });
+
+    const promptFlags = assessPromptForBannedTerms(job.prompt, job.negativePrompt);
+    if (promptFlags.length > 0) {
+      await this.updateJob(job.jobId, {
+        status: "flagged",
+        qualityFlags: promptFlags,
+        error: "Prompt failed staging quality gate.",
+      });
+      return;
+    }
+
+    let attempt = 0;
+    let outputUrl: string | null = null;
+    let providerMeta: Record<string, unknown> | undefined;
+    let usedNegativePrompt = job.negativePrompt;
+    let lastError = "";
+
+    while (attempt < 2 && !outputUrl) {
+      try {
+        if (attempt === 1) {
+          usedNegativePrompt = `${job.negativePrompt}, ABSOLUTELY NO ARCHITECTURAL CHANGES`;
+          await this.updateJob(job.jobId, { negativePromptUsed: usedNegativePrompt });
+        }
+        const generated = await generateStagedImageWithProvider({
+          inputImageUrl: job.inputImageUrl,
+          prompt: job.prompt,
+          negativePrompt: usedNegativePrompt,
+        });
+        outputUrl = generated.outputImageUrl;
+        providerMeta = generated.providerMeta;
+      } catch (error: any) {
+        lastError = error?.message || "generation_failed";
+        attempt++;
+      }
+    }
+
+    if (!outputUrl) {
+      await this.updateJob(job.jobId, {
+        status: "failed",
+        error: lastError || "Staging generation failed after retry.",
+      });
+      return;
+    }
+
+    const outputFlags = assessOutputMetadataIfAvailable(providerMeta);
+    if (outputFlags.length > 0) {
+      await this.updateJob(job.jobId, {
+        status: "flagged",
+        qualityFlags: outputFlags,
+        outputImageUrl: outputUrl,
+        error: "Output flagged by staging quality gate.",
+      });
+      return;
+    }
+
+    await this.updateJob(job.jobId, {
+      status: "done",
+      outputImageUrl: outputUrl,
+      qualityFlags: [],
+      error: null,
+    });
+
+    const jobRow = await db.select().from(stagingJobs).where(eq(stagingJobs.id, job.jobId));
+    const first = jobRow[0];
+    if (first) {
+      await db.insert(stagingAssets).values({
+        id: crypto.randomUUID(),
+        stagingJobId: job.jobId,
+        vibeId: first.vibeId,
+        imageUrl: outputUrl,
+      } as any);
+    }
+  }
+}
+
+export const stagingQueue = new StagingQueue(2);
+```
+
+[server/modules/staging/promptBuilder.ts]
+```ts
+import { VIBE_DEFINITIONS } from "@shared/tasteAlgorithm";
+import type { RoomType, VibeId } from "./stagingTypes";
+
+const HARD_CONSTRAINT_BLOCK =
+  "IMPORTANT: You are an interior designer staging this exact room. Preserve the roomâ€™s architecture and geometry. Keep the same camera angle. Do not renovate. Do not change floors, walls, windows, doors, ceiling, or built-ins. Only add furniture, decor, lighting, rugs, textiles, plants, and art.";
+
+const BASE_NEGATIVE_PROMPT =
+  "renovation, remodel, construction, carpentry, new window, new door, remove wall, add wall, change flooring, change ceiling, change layout, built-in cabinetry, structural beams, demolition";
+
+export function buildStagingPrompt({
+  vibeId,
+  roomType,
+  optionalRoomNotes,
+  strictness = "normal",
+}: {
+  vibeId: VibeId;
+  roomType: RoomType;
+  optionalRoomNotes?: string;
+  strictness?: "normal" | "strict";
+}): { prompt: string; negativePrompt: string } {
+  const def = VIBE_DEFINITIONS[vibeId];
+  const designPrinciples = def.psychology.join(", ");
+  const furnitureKit = def.stagingStyleRules.do.join(", ");
+  const visualKeywords = def.visualCues.join(", ");
+
+  const prompt = [
+    HARD_CONSTRAINT_BLOCK,
+    `Room type: ${roomType}.`,
+    optionalRoomNotes ? `Room notes: ${optionalRoomNotes}.` : "",
+    `Vibe: ${vibeId}.`,
+    `Design principles: ${designPrinciples}.`,
+    `Furniture kit: ${furnitureKit}.`,
+    `Visual keywords: ${visualKeywords}.`,
+    "Allowed additions only: furniture, decor, textiles, lighting fixtures, wall art, plants, rugs, accessories.",
+    "Do not modify floors, walls, windows, doors, ceiling, built-ins, cabinetry, or any structural element.",
+    "Composition: photorealistic, natural lighting, interior photography, coherent scale, realistic shadows.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const vibeNegative = def.forbiddenChanges.join(", ");
+  const strictSuffix = strictness === "strict" ? ", ABSOLUTELY NO ARCHITECTURAL CHANGES" : "";
+  const negativePrompt = `${BASE_NEGATIVE_PROMPT}, ${vibeNegative}${strictSuffix}`;
+
+  return { prompt, negativePrompt };
+}
+
+export { HARD_CONSTRAINT_BLOCK, BASE_NEGATIVE_PROMPT };
+```
+
+[server/modules/staging/stagingQualityGate.ts]
+```ts
+import { HARD_CONSTRAINT_BLOCK } from "./promptBuilder";
+
+const REQUIRED_PHRASES = [
+  "Preserve the roomâ€™s architecture and geometry",
+  "Keep the same camera angle",
+  "Do not renovate",
+  "Do not change floors, walls, windows, doors, ceiling, or built-ins",
+  "Only add furniture, decor, lighting, rugs, textiles, plants, and art",
+];
+
+const RENOVATION_TERMS = [
+  "knock down wall",
+  "knock down walls",
+  "add skylight",
+  "new skylight",
+  "change cabinetry",
+  "upgrade finishes",
+  "demolition",
+  "remove wall",
+  "add wall",
+  "new window",
+  "new door",
+  "change flooring",
+  "change layout",
+];
+
+export function assessPromptForBannedTerms(prompt: string, negativePrompt: string): string[] {
+  const flags: string[] = [];
+  const lowerPrompt = prompt.toLowerCase();
+  const lowerNegative = negativePrompt.toLowerCase();
+
+  if (!prompt.includes(HARD_CONSTRAINT_BLOCK)) {
+    flags.push("missing_hard_constraint_block");
+  }
+
+  for (const phrase of REQUIRED_PHRASES) {
+    if (!prompt.includes(phrase)) {
+      flags.push(`missing_required_phrase:${phrase}`);
+    }
+  }
+
+  for (const term of RENOVATION_TERMS) {
+    if (lowerPrompt.includes(term)) {
+      flags.push(`renovation_keyword_in_prompt:${term}`);
+    }
+  }
+
+  if (!lowerNegative.includes("no architectural changes") && !lowerNegative.includes("change layout")) {
+    flags.push("negative_prompt_not_strict_enough");
+  }
+
+  return flags;
+}
+
+export function assessOutputMetadataIfAvailable(providerMeta: any): string[] {
+  const flags: string[] = [];
+  if (!providerMeta) return flags;
+  if (providerMeta.safetyBlocked) {
+    flags.push("provider_safety_blocked");
+  }
+  if (providerMeta.geometryChanged === true) {
+    flags.push("geometry_change_suspected");
+  }
+  return flags;
+}
+```
+
+=====================================================================
+2) ENV VAR REFERENCES FOR AI CREDENTIALS / PROVIDER CONFIG
+=====================================================================
+
+[.env] relevant keys (secret values redacted)
+```env
+GOOGLE_APPLICATION_CREDENTIALS="google-auth.json"
+GEMINI_API_KEY=<redacted>
+```
+
+[All code references to env vars]
+```text
+.env:3:GOOGLE_APPLICATION_CREDENTIALS="google-auth.json"
+.env:5:GEMINI_API_KEY=<redacted>
+server\geminiTagger.ts:42:  const apiKey = process.env.GEMINI_API_KEY;
+server\geminiTagger.ts:44:    console.warn("[GeminiTagger] GEMINI_API_KEY not set, defaulting to Unclassified");
+server\webScraper.ts:115:  const apiKey = process.env.GEMINI_API_KEY;
+server\webScraper.ts:116:  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+server\webScraper.ts:247:    } else if (error.message?.includes("GEMINI_API_KEY")) {
+server\vertexImagegen.ts:20:    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\vertexImagegen.ts:24:        error: "GOOGLE_APPLICATION_CREDENTIALS not configured",
+server\routes.ts:26:  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\routes.ts:1175:      const apiKey = process.env.GEMINI_API_KEY;
+server\routes.ts:1249:      const apiKey = process.env.GEMINI_API_KEY;
+server\modules\staging\stagingRoutes.ts:79:  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\modules\staging\stagingRoutes.ts:82:      const bucketName = process.env.STAGING_BUCKET || "taste-to-lead-assets";
+server\modules\staging\stagingRoutes.ts:85:        projectId: process.env.GCLOUD_PROJECT || "gen-lang-client-0912710356",
+```
+
+=====================================================================
+3) REFERENCES TO generateStagedImage / stageImage / staging
+=====================================================================
+
+```text
+client\src\pages\StagingLab.tsx:37:      const res = await fetch("/api/staging/stage", {
+client\src\pages\StagingLab.tsx:52:    queryKey: ["/api/staging/batch", batchId],
+client\src\pages\StagingLab.tsx:54:      const res = await fetch(`/api/staging/batch/${batchId}`, { credentials: "include" });
+client\src\pages\StagingLab.tsx:116:                  <img src={job.outputImageUrl} alt={`${job.vibeId} staging`} className="w-full h-40 object-cover rounded" />
+client\src\pages\admin.tsx:37:type TabId = "agents" | "listings" | "staging";
+client\src\pages\admin.tsx:255:    queryKey: ["staging-status", pollingResultIds],
+client\src\pages\admin.tsx:262:          const res = await apiRequest("GET", `/api/admin/staging-status/${resultId}`);
+client\src\pages\admin.tsx:307:              queryClient.invalidateQueries({ queryKey: ["staging-status"] });
+client\src\pages\admin.tsx:357:      const hookRes = await apiRequest("POST", "/api/admin/staging-hooks", { roomDescription: "empty room for virtual staging" });
+client\src\pages\admin.tsx:410:    toast({ title: "Starting AI Generation", description: `Queueing ${card.name} staging job...` });
+client\src\pages\admin.tsx:413:      // Step 1: Analyze the room and get the staging prompt
+client\src\pages\admin.tsx:414:      const analyzeRes = await apiRequest("POST", "/api/admin/staging-analyze", {
+client\src\pages\admin.tsx:430:      toast({ title: "Job Submitted", description: `${card.name} staging processing started.` });
+client\src\pages\admin.tsx:432:      const generateRes = await apiRequest("POST", "/api/admin/staging-generate", {
+client\src\pages\admin.tsx:458:          description: `${card.name} staging is being processed.`
+client\src\pages\admin.tsx:472:        description: error.message || "Could not start staging job. Check console for details.",
+client\src\pages\admin.tsx:498:            data-testid="input-staging-upload"
+client\src\pages\admin.tsx:586:              <h3 className="font-semibold text-lg" data-testid="text-staging-results-title">8 Archetype Realities</h3>
+client\src\pages\admin.tsx:606:                  onClick={() => toast({ title: "Export Ready", description: `${selectedCount} staging variation(s) prepared. Connect storage to enable downloads.` })}
+client\src\pages\admin.tsx:616:          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="grid-staging-results">
+client\src\pages\admin.tsx:621:                data-testid={`card-staging-${card.name.toLowerCase()}`}
+client\src\pages\admin.tsx:624:                  <img src={card.imageUrl} alt={`${card.name} staging`} className="w-full h-full object-cover" />
+client\src\pages\admin.tsx:760:    { id: "staging", label: "AI Staging", icon: Wand2 },
+client\src\pages\admin.tsx:792:      {activeTab === "staging" && <StagingTab />}
+shared\tasteAlgorithm.ts:21:  stagingStyleRules: {
+shared\tasteAlgorithm.ts:48:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:69:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:81:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:93:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:105:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:117:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:121:    promptSeeds: ["editorial eclectic interior", "gallery-forward staging", "bold collected styling"],
+shared\tasteAlgorithm.ts:129:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:141:    stagingStyleRules: {
+shared\tasteAlgorithm.ts:295:    "Photorealistic virtual staging prompt for Imagen.",
+shared\tasteAlgorithm.ts:297:    `Room context: ${roomDescription?.trim() || "empty room for virtual staging"}.`,
+shared\tasteAlgorithm.ts:300:    `Do: ${definition.stagingStyleRules.do.join("; ")}.`,
+shared\tasteAlgorithm.ts:301:    `Do not: ${definition.stagingStyleRules.dont.join("; ")}.`,
+shared\schema.ts:198:export const stagingResults = pgTable("staging_results", {
+shared\schema.ts:210:export const stagingJobs = pgTable("staging_jobs", {
+shared\schema.ts:229:export const stagingAssets = pgTable("staging_assets", {
+shared\schema.ts:231:  stagingJobId: text("staging_job_id").notNull(),
+shared\schema.ts:237:export const insertStagingResultSchema = createInsertSchema(stagingResults).omit({
+shared\schema.ts:241:export const insertStagingJobSchema = createInsertSchema(stagingJobs).omit({
+shared\schema.ts:245:export const insertStagingAssetSchema = createInsertSchema(stagingAssets).omit({
+shared\schema.ts:250:export type StagingResult = typeof stagingResults.$inferSelect;
+shared\schema.ts:252:export type StagingJob = typeof stagingJobs.$inferSelect;
+shared\schema.ts:254:export type StagingAsset = typeof stagingAssets.$inferSelect;
+client\src\components\app-sidebar.tsx:24:  { title: "Staging Lab", url: "/staging", icon: Wand2 },
+client\src\App.tsx:73:      <Route path="/staging" component={StagingLab} />
+server\vertexImagegen.ts:15:export async function generateStagedImage(
+server\storage.ts:1:import { properties, leads, notifications, agents, organizations, syncRequests, swipes, stagingResults, importJobs, buyers, swipeEvents, type Property, type InsertProperty, type Lead, type InsertLead, type Notification, type InsertNotification, type Agent, type InsertAgent, type Organization, type InsertOrganization, type SyncRequest, type InsertSyncRequest, type Swipe, type InsertSwipe, type StagingResult, type InsertStagingResult, type ImportJob, type InsertImportJob, type Buyer, type InsertBuyer, type SwipeEvent, type InsertSwipeEvent } from "@shared/schema";
+server\storage.ts:265:    const [result] = await db.insert(stagingResults).values(data).returning();
+server\storage.ts:270:    const [result] = await db.select().from(stagingResults).where(eq(stagingResults.id, id));
+server\storage.ts:275:    const [updated] = await db.update(stagingResults).set(data).where(eq(stagingResults.id, id)).returning();
+server\routes.ts:12:import { generateStagedImage } from "./vertexImagegen";
+server\routes.ts:15:import { registerStagingRoutes } from "./modules/staging/stagingRoutes";
+server\routes.ts:1165:  app.post("/api/admin/staging-hooks", requireAdmin, async (req, res) => {
+server\routes.ts:1236:  app.post("/api/admin/staging-analyze", requireAdmin, async (req, res) => {
+server\routes.ts:1258:      const architectPrompt = `ACT AS: A Senior Interior Architect and staging planner.
+server\routes.ts:1272:Do: ${vibeDef.stagingStyleRules.do.join("; ")}.
+server\routes.ts:1273:Do not: ${vibeDef.stagingStyleRules.dont.join("; ")}.`;
+server\routes.ts:1318:  app.post("/api/admin/staging-generate", requireAdmin, async (req, res) => {
+server\routes.ts:1336:      // Create a staging result record immediately with status "processing"
+server\routes.ts:1337:      const stagingRecord = await storage.createStagingResult({
+server\routes.ts:1344:      console.log(`[StagingGenerate] Job ${stagingRecord.id} started for property ${propertyId}, vibe: ${promptVibe}`);
+server\routes.ts:1350:        resultId: stagingRecord.id,
+server\routes.ts:1355:      processImageGenerationJob(stagingRecord.id, normalizedPrompt, promptVibe, referenceImage).catch((error) => {
+server\routes.ts:1356:        console.error(`[StagingGenerate] Background job ${stagingRecord.id} failed:`, error);
+server\routes.ts:1360:      res.status(500).json({ message: "Failed to create staging job" });
+server\routes.ts:1392:          return generateStagedImage(prompt, referenceImage);
+server\routes.ts:1414:      const filename = `staging-${resultId}-${vibe}-${Date.now()}.png`;
+server\routes.ts:1452:  app.get("/api/admin/staging-status/:resultId", requireAdmin, async (req, res) => {
+server\routes.ts:1475:      res.status(500).json({ message: "Failed to fetch staging status" });
+server\modules\staging\stagingRoutes.ts:6:import { stagingJobs } from "@shared/schema";
+server\modules\staging\stagingRoutes.ts:9:import { stagingQueue } from "./stagingQueue";
+server\modules\staging\stagingRoutes.ts:10:import type { RoomType, VibeId } from "./stagingTypes";
+server\modules\staging\stagingRoutes.ts:88:      const filename = `staging-input-${batchId}-${Date.now()}.${ext}`;
+server\modules\staging\stagingRoutes.ts:102:  app.post("/api/staging/stage", async (req, res) => {
+server\modules\staging\stagingRoutes.ts:129:        await db.insert(stagingJobs).values({
+server\modules\staging\stagingRoutes.ts:146:        stagingQueue.enqueue({
+server\modules\staging\stagingRoutes.ts:159:      res.status(400).json({ message: error.message || "Failed to start staging batch" });
+server\modules\staging\stagingRoutes.ts:163:  app.get("/api/staging/batch/:batchId", async (req, res) => {
+server\modules\staging\stagingRoutes.ts:165:      const rows = await db.select().from(stagingJobs).where(eq(stagingJobs.batchId, req.params.batchId));
+server\modules\staging\stagingRoutes.ts:180:  app.get("/api/staging/job/:jobId", async (req, res) => {
+server\modules\staging\stagingRoutes.ts:182:      const rows = await db.select().from(stagingJobs).where(eq(stagingJobs.id, req.params.jobId));
+server\modules\staging\stagingQueue.ts:4:import { stagingAssets, stagingJobs } from "@shared/schema";
+server\modules\staging\stagingQueue.ts:5:import { assessOutputMetadataIfAvailable, assessPromptForBannedTerms } from "./stagingQualityGate";
+server\modules\staging\stagingQueue.ts:6:import { generateStagedImageWithProvider } from "./stagingProvider";
+server\modules\staging\stagingQueue.ts:7:import type { StagingJobStatus } from "./stagingTypes";
+server\modules\staging\stagingQueue.ts:75:      .update(stagingJobs)
+server\modules\staging\stagingQueue.ts:80:      .where(eq(stagingJobs.id, jobId));
+server\modules\staging\stagingQueue.ts:91:        error: "Prompt failed staging quality gate.",
+server\modules\staging\stagingQueue.ts:108:        const generated = await generateStagedImageWithProvider({
+server\modules\staging\stagingQueue.ts:135:        error: "Output flagged by staging quality gate.",
+server\modules\staging\stagingQueue.ts:147:    const jobRow = await db.select().from(stagingJobs).where(eq(stagingJobs.id, job.jobId));
+server\modules\staging\stagingQueue.ts:150:      await db.insert(stagingAssets).values({
+server\modules\staging\stagingQueue.ts:152:        stagingJobId: job.jobId,
+server\modules\staging\stagingQueue.ts:160:export const stagingQueue = new StagingQueue(2);
+server\modules\staging\promptBuilder.ts:2:import type { RoomType, VibeId } from "./stagingTypes";
+server\modules\staging\promptBuilder.ts:5:  "IMPORTANT: You are an interior designer staging this exact room. Preserve the room’s architecture and geometry. Keep the same camera angle. Do not renovate. Do not change floors, walls, windows, doors, ceiling, or built-ins. Only add furniture, decor, lighting, rugs, textiles, plants, and art.";
+server\modules\staging\promptBuilder.ts:23:  const furnitureKit = def.stagingStyleRules.do.join(", ");
+server\modules\staging\stagingProvider.ts:1:import { generateStagedImage } from "../../vertexImagegen";
+server\modules\staging\stagingProvider.ts:25:export async function generateStagedImageWithProvider(
+server\modules\staging\stagingProvider.ts:30:  const result = await generateStagedImage(mergedPrompt, referenceImage);
+server\modules\staging\stagingProvider.ts:32:    throw new Error(result.error || "staging_generation_failed");
+```
+
+=====================================================================
+4) AUTHENTICATION / PROVIDER ERROR LOGS & HANDLING
+=====================================================================
+
+```text
+server\db.ts:6:  throw new Error("DATABASE_URL must be set");
+server\geminiTagger.ts:42:  const apiKey = process.env.GEMINI_API_KEY;
+server\geminiTagger.ts:44:    console.warn("[GeminiTagger] GEMINI_API_KEY not set, defaulting to Unclassified");
+server\geminiTagger.ts:96:    console.error(`[GeminiTagger] Error: ${error.message}, defaulting to Unclassified`);
+server\index.ts:109:    const message = err.message || "Internal Server Error";
+server\index.ts:111:    console.error("Internal Server Error:", err);
+server\notificationService.ts:15:  //   throw new Error("X_REPLIT_TOKEN not found for repl/depl");
+server\notificationService.ts:31:  //   throw new Error("Resend not connected");
+server\notificationService.ts:39:    throw new Error("RESEND_API_KEY not found in environment");
+server\modules\staging\stagingRoutes.ts:23:  if (!boundaryMatch) throw new Error("Missing multipart boundary");
+server\modules\staging\stagingRoutes.ts:65:    throw new Error("Image file is required");
+server\modules\staging\stagingRoutes.ts:79:  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\modules\staging\stagingQueue.ts:100:    let lastError = "";
+server\modules\staging\stagingQueue.ts:116:        lastError = error?.message || "generation_failed";
+server\modules\staging\stagingQueue.ts:124:        error: lastError || "Staging generation failed after retry.",
+server\modules\staging\stagingQualityGate.ts:58:  if (providerMeta.safetyBlocked) {
+server\modules\staging\stagingQualityGate.ts:59:    flags.push("provider_safety_blocked");
+server\modules\staging\stagingProvider.ts:32:    throw new Error(result.error || "staging_generation_failed");
+server\modules\staging\stagingProvider.ts:37:      safetyBlocked: result.safetyBlocked || false,
+server\webScraper.ts:43:    const blocked = ["localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254", "metadata.google.internal"];
+server\webScraper.ts:44:    if (blocked.includes(hostname)) return false;
+server\webScraper.ts:55:    console.log("[WebScraper] URL blocked by SSRF protection");
+server\webScraper.ts:115:  const apiKey = process.env.GEMINI_API_KEY;
+server\webScraper.ts:116:  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+server\webScraper.ts:145:        throw new Error("Failed to parse property data from the webpage. The page may not contain recognizable property listings.");
+server\webScraper.ts:148:      if (err.message?.includes("429") && attempt < maxRetries - 1) {
+server\webScraper.ts:157:  throw new Error("Gemini API request failed after retries");
+server\webScraper.ts:230:      } catch (propError: any) {
+server\webScraper.ts:231:        console.error(`[WebScraper] Failed to import property: ${prop.title}`, propError.message);
+server\webScraper.ts:244:    let friendlyError = error.message;
+server\webScraper.ts:245:    if (error.message?.includes("429")) {
+server\webScraper.ts:246:      friendlyError = "AI service temporarily busy. Please try again in a minute.";
+server\webScraper.ts:247:    } else if (error.message?.includes("GEMINI_API_KEY")) {
+server\webScraper.ts:248:      friendlyError = "AI service not configured. Contact support.";
+server\webScraper.ts:252:      errorMessage: friendlyError,
+server\webScraper.ts:254:    return { importedCount: 0, error: friendlyError };
+server\static.ts:8:    throw new Error(
+server\vite.ts:54:      vite.ssrFixStacktrace(e as Error);
+server\routes.ts:26:  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\routes.ts:34:  console.warn("[GCS] Failed to initialize Storage client:", err);
+server\routes.ts:41:      console.error("[GCS] Storage client not initialized");
+server\routes.ts:64:    console.error("[GCS] Upload failed:", error.message);
+server\routes.ts:109:// Retry wrapper with exponential backoff for 429 errors
+server\routes.ts:115:  let lastError: any;
+server\routes.ts:120:      lastError = err;
+server\routes.ts:121:      const is429 = err.message?.includes("429") || err.message?.includes("quota") || err.message?.includes("Resource exhausted");
+server\routes.ts:122:      if (!is429 || attempt === maxRetries) throw err;
+server\routes.ts:124:      console.log(`[RateLimit] 429 hit, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+server\routes.ts:128:  throw lastError;
+server\routes.ts:173:    return res.status(403).json({ message: "Admin access required" });
+server\routes.ts:307:        return res.status(403).json({ message: "Please verify your email before signing up" });
+server\routes.ts:678:        return res.status(403).json({ message: "Forbidden: property belongs to another organization" });
+server\routes.ts:695:        return res.status(403).json({ message: "Forbidden: property belongs to another organization" });
+server\routes.ts:930:        return res.status(403).json({ message: "Forbidden: property belongs to another organization" });
+server\routes.ts:1065:        return res.status(403).json({ message: "Premium subscription required" });
+server\routes.ts:1077:        const blocked = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
+server\routes.ts:1078:        if (blocked.includes(parsed.hostname)) {
+server\routes.ts:1116:        return res.status(403).json({ message: "Super Admin access required" });
+server\routes.ts:1175:      const apiKey = process.env.GEMINI_API_KEY;
+server\routes.ts:1224:      console.error("[StagingHooks] Error:", error.message);
+server\routes.ts:1225:      if (error.message?.includes("429") || error.message?.includes("quota")) {
+server\routes.ts:1249:      const apiKey = process.env.GEMINI_API_KEY;
+server\routes.ts:1310:      console.error("[StagingAnalyze] Error:", error.message);
+server\routes.ts:1311:      if (error.message?.includes("429") || error.message?.includes("quota") || error.message?.includes("Resource exhausted")) {
+server\routes.ts:1312:        return res.status(429).json({ message: "Gemini API rate limit hit. The request has been retried automatically but the quota is still exhausted. Please wait a minute and try again." });
+server\routes.ts:1359:      console.error("[StagingGenerate] Error:", error.message);
+server\routes.ts:1418:        // Upload failed, but generation succeeded - store as fallback data URL
+server\routes.ts:1446:      } catch (updateError) {
+server\routes.ts:1447:        console.error(`[StagingWorker] Job ${resultId} - Failed to update error status:`, updateError);
+server\routes.ts:1474:      console.error("[StagingStatus] Error:", error.message);
+server\portfolioImport.ts:191:  if (!response.ok) throw new Error(`Could not fetch URL (${response.status})`);
+server\portfolioImport.ts:195:    throw new Error(URL_IMPORT_FAIL_MESSAGE);
+server\portfolioImport.ts:288:  if (!boundaryMatch) throw new Error("Multipart boundary missing");
+server\portfolioImport.ts:322:  if (!agentId) throw new Error("agentId is required");
+server\portfolioImport.ts:323:  if (!csvText) throw new Error("CSV file is required");
+server\vertexImagegen.ts:12:  safetyBlocked?: boolean;
+server\vertexImagegen.ts:20:    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+server\vertexImagegen.ts:24:        error: "GOOGLE_APPLICATION_CREDENTIALS not configured",
+server\vertexImagegen.ts:69:    // Check for safety filter blocks
+server\vertexImagegen.ts:70:    if (prediction.structValue?.fields?.safetyAttributes) {
+server\vertexImagegen.ts:71:      const safetyAttr = prediction.structValue.fields.safetyAttributes;
+server\vertexImagegen.ts:72:      if (safetyAttr.structValue?.fields?.blocked?.boolValue === true) {
+server\vertexImagegen.ts:73:        console.warn("[VertexImagegen] Image blocked by safety filter");
+server\vertexImagegen.ts:76:          safetyBlocked: true,
+server\vertexImagegen.ts:77:          error: "Image generation blocked by safety filter. Please try a different prompt or room description.",
+server\vertexImagegen.ts:105:    console.error("[VertexImagegen] Error:", error.message);
+server\vertexImagegen.ts:107:    // Re-throw rate limit / quota errors so the retry wrapper can handle them
+server\vertexImagegen.ts:108:    if (error.message?.includes("quota") || error.message?.includes("429") || error.message?.includes("Resource exhausted")) {
+server\vertexImagegen.ts:113:      error.message?.includes("permission") ||
+server\vertexImagegen.ts:114:      error.message?.includes("403")
+server\vertexImagegen.ts:118:        error: "Vertex AI API not enabled or insufficient permissions. Check your Google Cloud console.",
+```

@@ -10,9 +10,149 @@ import { sendEmail, buildMatchEmailHtml } from "./notificationService";
 import { classifyPropertyImage } from "./geminiTagger";
 import { importFromUrl } from "./webScraper";
 import { generateStagedImage } from "./vertexImagegen";
+import { VIBES, VIBE_DEFINITIONS, computeMatchScore, computeTasteScore, buildStagingPrompt, computeBuyerVibeVector, computeVectorMatchScore, type Vibe, type BuyerSwipeAction } from "@shared/tasteAlgorithm";
+import { extractListingsFromPortfolioUrl, parseCsvMultipart, runPortfolioImportJob, csvRowsToListings, URL_IMPORT_FAIL_MESSAGE } from "./portfolioImport";
+import { registerStagingRoutes } from "./modules/staging/stagingRoutes";
 import bcrypt from "bcryptjs";
+import { Storage } from "@google-cloud/storage";
+import { z } from "zod";
 
 const SUPER_ADMIN_EMAIL = "vinnysladeb@gmail.com";
+const GCS_BUCKET_NAME = "taste-to-lead-assets";
+
+// Initialize Google Cloud Storage
+let gcsClient: Storage | null = null;
+try {
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (credentialsPath) {
+    gcsClient = new Storage({
+      keyFilename: credentialsPath,
+      projectId: "gen-lang-client-0912710356",
+    });
+  }
+} catch (err) {
+  console.warn("[GCS] Failed to initialize Storage client:", err);
+}
+
+// Upload base64 image to Google Cloud Storage and return public URL
+async function uploadImageToGCS(base64Data: string, filename: string): Promise<string | null> {
+  try {
+    if (!gcsClient) {
+      console.error("[GCS] Storage client not initialized");
+      return null;
+    }
+
+    const bucket = gcsClient.bucket(GCS_BUCKET_NAME);
+    const file = bucket.file(filename);
+
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64Data, "base64");
+
+    // Upload to GCS with public-read ACL
+    await file.save(buffer, {
+      metadata: {
+        contentType: "image/png",
+      },
+      public: true,
+    });
+
+    // Return public URL
+    const publicUrl = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/${filename}`;
+    console.log(`[GCS] Image uploaded successfully: ${publicUrl}`);
+    return publicUrl;
+  } catch (error: any) {
+    console.error("[GCS] Upload failed:", error.message);
+    return null;
+  }
+}
+
+// ── Sequential queue to prevent API rate limits ──
+// Ensures only one Gemini/Vertex call runs at a time with delays between them.
+class ApiQueue {
+  private queue: Array<() => Promise<void>> = [];
+  private running = false;
+  private delayMs: number;
+
+  constructor(delayMs = 2000) {
+    this.delayMs = delayMs;
+  }
+
+  enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await fn();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      });
+      this.processNext();
+    });
+  }
+
+  private async processNext(): Promise<void> {
+    if (this.running || this.queue.length === 0) return;
+    this.running = true;
+    const task = this.queue.shift()!;
+    try {
+      await task;
+    } finally {
+      // Wait between calls to avoid rate limits
+      await new Promise((r) => setTimeout(r, this.delayMs));
+      this.running = false;
+      this.processNext();
+    }
+  }
+}
+
+// Retry wrapper with exponential backoff for 429 errors
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 3,
+  baseDelay = 5000
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const is429 = err.message?.includes("429") || err.message?.includes("quota") || err.message?.includes("Resource exhausted");
+      if (!is429 || attempt === maxRetries) throw err;
+      const delay = baseDelay * Math.pow(2, attempt); // 5s, 10s, 20s
+      console.log(`[RateLimit] 429 hit, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
+
+// One queue for Gemini calls, one for Vertex AI calls — each processes one at a time
+const geminiQueue = new ApiQueue(500);    // 500ms gap between Gemini calls
+const vertexQueue = new ApiQueue(500);    // 500ms gap between Vertex AI calls
+
+const buyerSwipeSchema = z.object({
+  buyerId: z.string().min(1),
+  listingId: z.number().int().positive(),
+  action: z.enum(["like", "nope", "save", "skip"]),
+  dwellMs: z.number().int().min(0).max(3600000).default(0),
+});
+
+function getTopVibeFromProperty(property: any): Vibe | null {
+  const fromTop = Array.isArray(property?.vibeTop) ? property.vibeTop[0]?.vibe : null;
+  if (fromTop && VIBES.includes(fromTop as Vibe)) return fromTop as Vibe;
+  if (property?.vibeTag && VIBES.includes(property.vibeTag as Vibe)) return property.vibeTag as Vibe;
+  return null;
+}
+
+function getListingVector(property: any): Partial<Record<Vibe, number>> | null {
+  const raw = property?.vibeVector;
+  if (raw && typeof raw === "object") return raw as Partial<Record<Vibe, number>>;
+  const top = getTopVibeFromProperty(property);
+  if (!top) return null;
+  return Object.fromEntries(VIBES.map((v) => [v, v === top ? 1 : 0])) as Partial<Record<Vibe, number>>;
+}
 
 function isSuperAdmin(req: Request): boolean {
   return req.session?.agentEmail === SUPER_ADMIN_EMAIL;
@@ -39,6 +179,7 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  registerStagingRoutes(app);
 
 
   app.get("/about", (_req, res) => {
@@ -284,13 +425,9 @@ export async function registerRoutes(
 
       const tasteProfile = req.session?.tasteProfile;
       if (tasteProfile && Object.keys(tasteProfile).length > 0 && !req.session?.agentId) {
-        const totalSwipes = Object.values(tasteProfile).reduce((a, b) => a + b, 0);
         results = results.map((p) => {
-          const tag = p.vibeTag || "Unclassified";
-          const score = tag !== "Unclassified" && tasteProfile[tag]
-            ? (tasteProfile[tag] / totalSwipes) * 100
-            : 0;
-          return { ...p, tasteScore: Math.round(score) };
+          const tasteScore = computeTasteScore(tasteProfile, p.vibeTag);
+          return { ...p, tasteScore };
         }).sort((a, b) => (b as any).tasteScore - (a as any).tasteScore);
       }
 
@@ -307,6 +444,207 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Property not found" });
       }
       res.json(property);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/listings/feed", async (req, res) => {
+    try {
+      const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+      const pageSize = Math.min(50, Math.max(1, parseInt(String(req.query.pageSize || "20"), 10) || 20));
+      const all = await storage.getProperties({ status: "active" });
+      const start = (page - 1) * pageSize;
+      const items = all.slice(start, start + pageSize).map((p) => {
+        const topVibe = getTopVibeFromProperty(p);
+        const vibeTags = Array.isArray(p.vibeTop)
+          ? p.vibeTop.slice(0, 3).map((v: any) => v?.vibe).filter(Boolean)
+          : topVibe
+            ? [topVibe]
+            : [];
+        return {
+          id: p.id,
+          address: p.location,
+          price: p.price,
+          beds: p.bedrooms,
+          baths: p.bathrooms,
+          sqft: p.sqft,
+          heroPhotoUrl: (p.images && p.images[0]) || null,
+          topVibe: topVibe || "Unclassified",
+          vibeTags,
+        };
+      });
+      res.json({ page, pageSize, items });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/buyer/init", async (req, res) => {
+    try {
+      const candidate = typeof req.body?.buyerId === "string" ? req.body.buyerId.trim() : "";
+      if (candidate) {
+        const existing = await storage.getBuyer(candidate);
+        if (existing) {
+          return res.json({ buyerId: existing.id });
+        }
+      }
+      const buyerId = crypto.randomUUID();
+      await storage.createBuyer({ id: buyerId } as any);
+      res.status(201).json({ buyerId });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/buyer/swipe", async (req, res) => {
+    try {
+      const parsed = buyerSwipeSchema.parse(req.body);
+      const listing = await storage.getProperty(parsed.listingId);
+      if (!listing) {
+        return res.status(404).json({ message: "Listing not found" });
+      }
+
+      const buyer = await storage.getBuyer(parsed.buyerId);
+      if (!buyer) {
+        await storage.createBuyer({ id: parsed.buyerId } as any);
+      }
+
+      await storage.createSwipeEvent({
+        id: crypto.randomUUID(),
+        buyerId: parsed.buyerId,
+        listingId: parsed.listingId,
+        action: parsed.action,
+        dwellMs: parsed.dwellMs || 0,
+      } as any);
+
+      const events = await storage.getSwipeEventsByBuyer(parsed.buyerId);
+      const listingIds = Array.from(new Set(events.map((e) => e.listingId)));
+      const listings = await storage.getPropertiesByIds(listingIds);
+      const listingMap = new Map<number, any>(listings.map((p) => [p.id, p]));
+
+      const buyerVibeEvents = events.map((event) => ({
+        action: event.action as BuyerSwipeAction,
+        vibe: getTopVibeFromProperty(listingMap.get(event.listingId)),
+      }));
+      const buyerProfile = computeBuyerVibeVector(buyerVibeEvents);
+      const listingVector = getListingVector(listing);
+      const matchScore = computeVectorMatchScore(buyerProfile.vector, listingVector);
+
+      const listingTopVibes = Array.isArray(listing.vibeTop) && listing.vibeTop.length > 0
+        ? listing.vibeTop
+        : (() => {
+            const top = getTopVibeFromProperty(listing);
+            return top ? [{ vibe: top, score: 1 }] : [];
+          })();
+      const buyerTopVibes = buyerProfile.topVibes;
+      const topBuyerVibe = buyerTopVibes[0]?.vibe || null;
+      const topListingVibe = listingTopVibes[0]?.vibe || null;
+
+      let leadCreated = false;
+      let hotLead = false;
+
+      if (parsed.action === "save" || matchScore >= 85) {
+        const existingLead = await storage.getLeadByBuyerAndProperty(parsed.buyerId, listing.id);
+        if (!existingLead) {
+          const vibeDef = topBuyerVibe ? VIBE_DEFINITIONS[topBuyerVibe] : null;
+          const talkTrack = topBuyerVibe && vibeDef
+            ? `This buyer is ${topBuyerVibe}. Pitch ${vibeDef.copyHook}. Show them listings that feel ${vibeDef.keywords.slice(0, 4).join(", ")}.`
+            : "This buyer is still emerging. Pitch based on clear style cues and price fit.";
+          const avoidList = topBuyerVibe && vibeDef ? vibeDef.forbiddenChanges : [];
+
+          await storage.createLead({
+            propertyId: listing.id,
+            name: "Anonymous Buyer",
+            phone: "N/A",
+            agentId: listing.agentId || null,
+            buyerId: parsed.buyerId,
+            buyerVector: buyerProfile.vector as any,
+            listingVector: (listingVector || null) as any,
+            topBuyerVibes: buyerTopVibes as any,
+            topListingVibes: listingTopVibes as any,
+            matchScore,
+            talkTrack,
+            avoidList: avoidList as any,
+          } as any);
+
+          hotLead = matchScore >= 95;
+          leadCreated = true;
+
+          await storage.createNotification({
+            recipientId: listing.agentId,
+            type: "match",
+            content: JSON.stringify({
+              message: `New lead: Buyer vibe ${topBuyerVibe || "Unknown"} matched ${listing.location} (score ${matchScore}). Talk track: ${talkTrack}`,
+              propertyId: listing.id,
+              buyerId: parsed.buyerId,
+              matchScore,
+              topBuyerVibe,
+              topListingVibe,
+            }),
+            priority: hotLead ? "critical" : "high",
+            readStatus: false,
+          });
+        }
+      }
+
+      res.json({
+        matchScore,
+        buyerTopVibes,
+        listingTopVibes,
+        leadCreated,
+        hotLead: matchScore >= 95,
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/buyer/profile", async (req, res) => {
+    try {
+      const buyerId = String(req.query.buyerId || "");
+      if (!buyerId) return res.status(400).json({ message: "buyerId is required" });
+
+      const events = await storage.getSwipeEventsByBuyer(buyerId);
+      const listingIds = Array.from(new Set(events.map((e) => e.listingId)));
+      const listings = await storage.getPropertiesByIds(listingIds);
+      const listingMap = new Map<number, any>(listings.map((p) => [p.id, p]));
+
+      const buyerVibeEvents = events.map((event) => ({
+        action: event.action as BuyerSwipeAction,
+        vibe: getTopVibeFromProperty(listingMap.get(event.listingId)),
+      }));
+      const profile = computeBuyerVibeVector(buyerVibeEvents);
+      res.json(profile);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/agent/leads", requireAgent, async (req, res) => {
+    try {
+      const requested = typeof req.query.agentId === "string" ? req.query.agentId : null;
+      const agentId = requested || String(req.session.agentId!);
+      const rows = await storage.getAgentLeads(agentId);
+      const propertyIds = rows.map((r) => r.propertyId).filter((v): v is number => typeof v === "number");
+      const properties = await storage.getPropertiesByIds(Array.from(new Set(propertyIds)));
+      const propertyMap = new Map<number, any>(properties.map((p) => [p.id, p]));
+
+      res.json(rows.map((lead) => {
+        const listing = propertyMap.get(lead.propertyId);
+        return {
+          id: lead.id,
+          buyerId: lead.buyerId,
+          listingId: lead.propertyId,
+          address: listing?.location || null,
+          matchScore: lead.matchScore,
+          topBuyerVibes: lead.topBuyerVibes || [],
+          topListingVibes: lead.topListingVibes || [],
+          talkTrack: lead.talkTrack || "",
+          avoidList: lead.avoidList || [],
+          createdAt: lead.createdAt,
+        };
+      }));
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -331,7 +669,7 @@ export async function registerRoutes(
 
   app.patch("/api/properties/:id", requireAgent, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getProperty(id);
       if (!existing) {
         return res.status(404).json({ message: "Property not found" });
@@ -348,7 +686,7 @@ export async function registerRoutes(
 
   app.delete("/api/properties/:id", requireAgent, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getProperty(id);
       if (!existing) {
         return res.status(404).json({ message: "Property not found" });
@@ -469,12 +807,18 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Property not found" });
       }
 
+      const tasteScore = computeTasteScore(req.session?.tasteProfile, property.vibeTag);
+      const matchScore = computeMatchScore(tasteScore);
+      const matchedTags = property.vibeTag && property.vibeTag !== "Unclassified"
+        ? [property.vibeTag]
+        : [];
+
       const sessionId = req.sessionID || "anonymous";
       await storage.createSwipe({
         sessionId,
         propertyId: parsed.propertyId,
         direction: parsed.direction,
-        matchScore: parsed.matchScore,
+        matchScore,
       });
 
       if (parsed.direction === "right" && property.vibeTag && property.vibeTag !== "Unclassified") {
@@ -487,11 +831,10 @@ export async function registerRoutes(
 
       let notification = null;
 
-      if (parsed.direction === "right" && parsed.matchScore > 85) {
-        const isCritical = parsed.matchScore > 95;
+      if (parsed.direction === "right" && matchScore > 85) {
+        const isCritical = matchScore > 95;
         const priority = isCritical ? "critical" : "high";
         const userName = parsed.userName || "A potential buyer";
-        const matchedTags = parsed.matchedTags || [];
 
         const tagText = matchedTags.length > 0
           ? ` | Matched on: ${matchedTags.join(", ")}`
@@ -506,9 +849,9 @@ export async function registerRoutes(
             propertyTitle: property.title,
             propertyLocation: property.location,
             propertyPrice: property.price,
-            matchScore: parsed.matchScore,
+            matchScore,
             matchedTags,
-            message: `${userName} swiped right on "${property.title}" (${parsed.matchScore}% match)${tagText}`,
+            message: `${userName} swiped right on "${property.title}" (${matchScore}% match)${tagText}`,
           }),
           priority,
           readStatus: false,
@@ -519,7 +862,7 @@ export async function registerRoutes(
             userName,
             propertyTitle: property.title,
             propertyLocation: property.location,
-            matchScore: parsed.matchScore,
+            matchScore,
             matchedTags,
             price: property.price,
           });
@@ -531,7 +874,7 @@ export async function registerRoutes(
         }
       }
 
-      res.json({ success: true, notification });
+      res.json({ success: true, notification, matchScore, tasteScore, matchedTags });
     } catch (error: any) {
       res.status(400).json({ message: error.message });
     }
@@ -559,7 +902,7 @@ export async function registerRoutes(
 
   app.patch("/api/notifications/:id/read", requireAgent, async (req, res) => {
     try {
-      await storage.markNotificationRead(parseInt(req.params.id));
+      await storage.markNotificationRead(parseInt(req.params.id as string));
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -578,7 +921,7 @@ export async function registerRoutes(
 
   app.post("/api/properties/:id/retag", requireAgent, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getProperty(id);
       if (!existing) {
         return res.status(404).json({ message: "Property not found" });
@@ -596,9 +939,128 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/portfolio/import/url", requireAgent, async (req, res) => {
+    try {
+      const bodyAgentId = typeof req.body?.agentId === "string" ? req.body.agentId.trim() : "";
+      const agentId = bodyAgentId || String(req.session.agentId!);
+      const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
+
+      if (!url || !/^https?:\/\//i.test(url)) {
+        return res.status(400).json({ message: "A valid URL is required" });
+      }
+
+      const jobId = crypto.randomUUID();
+      await storage.createImportJob({
+        id: jobId,
+        agentId,
+        sourceType: "url",
+        source: url,
+        status: "queued",
+        total: 0,
+        processed: 0,
+        succeeded: 0,
+        failedCount: 0,
+        error: null,
+      } as any);
+
+      res.status(202).json({ jobId });
+
+      setImmediate(async () => {
+        try {
+          const listings = await extractListingsFromPortfolioUrl(url);
+          await runPortfolioImportJob(jobId, agentId, listings);
+        } catch (error: any) {
+          const message = error?.message || URL_IMPORT_FAIL_MESSAGE;
+          await storage.updateImportJob(jobId, {
+            status: "failed",
+            error: message,
+            processed: 0,
+            succeeded: 0,
+            failedCount: 0,
+          } as any);
+        }
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/portfolio/import/csv", requireAgent, async (req, res) => {
+    try {
+      const { agentId, csvText, filename } = await parseCsvMultipart(req);
+      const listings = csvRowsToListings(csvText);
+      if (listings.length === 0) {
+        return res.status(400).json({ message: "CSV did not contain valid rows. 'address' is required." });
+      }
+
+      const jobId = crypto.randomUUID();
+      await storage.createImportJob({
+        id: jobId,
+        agentId,
+        sourceType: "csv",
+        source: filename,
+        status: "queued",
+        total: 0,
+        processed: 0,
+        succeeded: 0,
+        failedCount: 0,
+        error: null,
+      } as any);
+
+      res.status(202).json({ jobId });
+      setImmediate(async () => {
+        try {
+          await runPortfolioImportJob(jobId, agentId, listings);
+        } catch (error: any) {
+          await storage.updateImportJob(jobId, {
+            status: "failed",
+            error: error?.message || "CSV import failed",
+          } as any);
+        }
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/portfolio/import/job/:jobId", requireAgent, async (req, res) => {
+    try {
+      const rawJobId = req.params.jobId;
+      const jobId = Array.isArray(rawJobId) ? rawJobId[0] : rawJobId;
+      if (!jobId) {
+        return res.status(400).json({ message: "jobId is required" });
+      }
+      const job = await storage.getImportJob(jobId);
+      if (!job) return res.status(404).json({ message: "Import job not found" });
+      res.json(job);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/portfolio/:agentId", async (req, res) => {
+    try {
+      const agentId = String(req.params.agentId);
+      const listings = await storage.getPropertiesByAgent(agentId);
+      const payload = listings.map((p) => {
+        const top = Array.isArray(p.vibeTop) ? p.vibeTop : [];
+        const primary = top[0]?.vibe || p.vibeTag || "Unclassified";
+        return {
+          ...p,
+          topVibes: top,
+          primaryVibeBadge: primary,
+          algorithmVersion: p.vibeVersion || null,
+        };
+      });
+      res.json(payload);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
   app.post("/api/sync-requests", requireAgent, async (req, res) => {
     try {
-      const agent = await storage.getAgent(req.session.agentId);
+      const agent = await storage.getAgent(req.session.agentId!);
       if (!agent || (agent.subscriptionTier !== "premium" && agent.email !== SUPER_ADMIN_EMAIL)) {
         return res.status(403).json({ message: "Premium subscription required" });
       }
@@ -621,7 +1083,7 @@ export async function registerRoutes(
       }
 
       const syncRequest = await storage.createSyncRequest({
-        userId: req.session.agentId,
+        userId: req.session.agentId!,
         websiteUrl,
         status: "pending",
         importedCount: 0,
@@ -641,7 +1103,7 @@ export async function registerRoutes(
 
   app.get("/api/sync-requests", requireAgent, async (req, res) => {
     try {
-      const requests = await storage.getSyncRequests(req.session.agentId);
+      const requests = await storage.getSyncRequests(req.session.agentId!);
       res.json(requests);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -689,7 +1151,7 @@ export async function registerRoutes(
 
   app.post("/api/admin/listing/:id/delete", requireAdmin, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const deleted = await storage.deleteProperty(id);
       if (!deleted) {
         return res.status(404).json({ message: "Listing not found" });
@@ -701,18 +1163,14 @@ export async function registerRoutes(
   });
 
   app.post("/api/admin/staging-hooks", requireAdmin, async (req, res) => {
+    const archetypes = VIBES.map((name) => ({
+      name,
+      keywords: VIBE_DEFINITIONS[name].keywords.join(", "),
+      psychology: VIBE_DEFINITIONS[name].psychology.join(", "),
+    }));
+
     try {
       const { roomDescription } = req.body;
-      const archetypes = [
-        { name: "Monarch", keywords: "Penthouse, Gold, Marble, Velvet, Crystal, Grand, Opulent", psychology: "Status, Power, Dominance" },
-        { name: "Industrialist", keywords: "Loft, Warehouse, Exposed Brick, Concrete, Steel Beams, Raw", psychology: "Authenticity, Strength" },
-        { name: "Purist", keywords: "Minimalist, White, Clean Lines, Seamless, Hidden Storage, Zero Clutter", psychology: "Discipline, Clarity, Focus" },
-        { name: "Naturalist", keywords: "Sanctuary, Biophilic, Plants, Green, Indoor-Outdoor, Retreat, Wood", psychology: "Grounding, Peace, Wellness" },
-        { name: "Futurist", keywords: "Smart Home, Tech, Neon, LED, Glass, Chrome, Sleek, Automated", psychology: "Innovation, Speed, Efficiency" },
-        { name: "Curator", keywords: "Art, Gallery, Eclectic, Bold, Color, Statement, Unique, Mural", psychology: "Expression, Storytelling, Uniqueness" },
-        { name: "Nomad", keywords: "Boho, Eclectic, Travel, Collected, Rugs, Texture, Earth Tones, Global", psychology: "Freedom, Warmth, Experience" },
-        { name: "Classicist", keywords: "Historic, Traditional, Estate, Molding, Library, Wood Paneling, Timeless", psychology: "Legacy, History, Respect" },
-      ];
 
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
@@ -736,8 +1194,14 @@ Return ONLY a valid JSON array with exactly 8 objects, each with "archetype" and
 The 8 archetypes:
 ${archetypes.map(a => `- ${a.name}: ${a.keywords}. Psychology: ${a.psychology}`).join("\n")}`;
 
-      const result = await model.generateContent(prompt);
-      const text = result.response.text().trim();
+      // Queue the Gemini call and retry on rate limits
+      const text = await geminiQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log("[StagingHooks] Queued Gemini call starting...");
+          const result = await model.generateContent(prompt);
+          return result.response.text().trim();
+        })
+      );
 
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
@@ -776,21 +1240,11 @@ ${archetypes.map(a => `- ${a.name}: ${a.keywords}. Psychology: ${a.psychology}`)
         return res.status(400).json({ message: "Image data and target vibe are required" });
       }
 
-      const STYLES: Record<string, string> = {
-        "Monarch": "Modern Luxury Opulence. Palette: Black, Gold, Emerald Green. Furniture: Tufted velvet sofas, brass coffee tables, crystal lighting. Mood: Expensive, Moody, High-Contrast.",
-        "Industrialist": "Raw Urban Loft. Palette: Charcoal, Rust, Concrete Gray. Furniture: Distressed cognac leather chesterfields, black steel shelving, exposed brick. Mood: Masculine, Gritty, Authentic.",
-        "Purist": "Japanese-Scandinavian Minimalist. Palette: Warm White, Beige, Light Oak. Furniture: Low-profile linen sofas, noguchi tables, zero clutter. Mood: Zen, Airy, Soft.",
-        "Naturalist": "Biophilic Sanctuary. Palette: Sage Green, Terracotta, Raw Wood. Furniture: Rattan lounge chairs, living plant walls, jute rugs, organic shapes. Mood: Fresh, Oxygenated, Peaceful.",
-        "Futurist": "Cyberpunk High-Tech. Palette: Neon Blue, Cool White, Chrome. Furniture: Floating LED beds, acrylic chairs, glossy surfaces, geometric shapes. Mood: Clinical, Sharp, Electric.",
-        "Curator": "Eclectic Maximalist. Palette: Mustard, Teal, Burnt Orange. Furniture: Sculptural velvet armchairs, gallery walls of mixed art, patterned persian rugs. Mood: Artsy, Bold, Collected.",
-        "Nomad": "Global Boho. Palette: Ochre, Sand, Deep Red. Furniture: Low floor seating, moroccan poufs, layered textiles, macrame, reclaimed wood. Mood: Warm, Traveled, Earthy.",
-        "Classicist": "Traditional Heritage. Palette: Navy Blue, Cream, Mahogany. Furniture: Wingback chairs, heavy drapes, antique brass lamps, persian rugs. Mood: Timeless, Wealthy, Established.",
-      };
-
-      const vibeDesc = STYLES[targetVibe];
-      if (!vibeDesc) {
+      if (!VIBES.includes(targetVibe as Vibe)) {
         return res.status(400).json({ message: `Unknown vibe: ${targetVibe}` });
       }
+      const resolvedVibe = targetVibe as Vibe;
+      const vibeDef = VIBE_DEFINITIONS[resolvedVibe];
 
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
@@ -801,29 +1255,22 @@ ${archetypes.map(a => `- ${a.name}: ${a.keywords}. Psychology: ${a.psychology}`)
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-      const architectPrompt = `ACT AS: A Senior Interior Architect and 3D Renderer.
+      const architectPrompt = `ACT AS: A Senior Interior Architect and staging planner.
 
-TASK: Analyze the provided image of an empty room and generate a strict execution prompt for an image generation model.
+TASK: Analyze the provided image of an empty room and return a concise room brief.
 
-STEP 1: ANALYZE THE PHYSICS
-- Identify the FLOORING material (e.g., "White Oak Herringbone", "Polished Concrete").
-- Identify the LIGHT SOURCE (e.g., "Soft diffused sunlight from large bay window on left").
-- Identify the PERSPECTIVE (e.g., "Eye-level wide shot", "Two-point perspective").
-- Identify the NEGATIVE SPACE (Where is the floor empty? That is where furniture goes).
+Return exactly one paragraph, no bullet points, containing:
+- room type
+- camera perspective
+- flooring material
+- light direction and intensity
+- major architectural elements that must stay fixed
+- empty/negative space zones suitable for furniture
 
-STEP 2: APPLY THE VIBE
-- Apply the following design language: "${vibeDesc}"
-- Select furniture pieces that match this vibe EXACTLY.
-
-STEP 3: GENERATE THE OUTPUT
-Write a single, continuous prompt string using this exact template. Do not add intro text.
-
-TEMPLATE:
-"A photorealistic [Perspective] of an empty [Room Type] now staged with ${targetVibe} furniture. The room features [Flooring] and [Architectural Details].
-CENTRAL FOCUS: A [Key Furniture Piece] positioned in the [Negative Space], facing the [Focal Point].
-DETAILS: [List 3 specific decor items from Vibe].
-LIGHTING: [Light Source] creating [Mood] shadows.
-QUALITY: Architectural Digest photography, 8k resolution, highly detailed textures, ray-tracing, depth of field."`;
+Keep it concrete and visual. Vibe target: ${resolvedVibe}.
+Vibe cues: ${vibeDef.promptSeeds.join(", ")}.
+Do: ${vibeDef.stagingStyleRules.do.join("; ")}.
+Do not: ${vibeDef.stagingStyleRules.dont.join("; ")}.`;
 
       const base64Match = imageData.match(/^data:image\/\w+;base64,(.+)$/);
       if (!base64Match) {
@@ -833,18 +1280,36 @@ QUALITY: Architectural Digest photography, 8k resolution, highly detailed textur
       const mimeMatch = imageData.match(/^data:(image\/\w+);base64,/);
       const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
 
-      const result = await model.generateContent([
-        { inlineData: { mimeType, data: base64Match[1] } },
-        architectPrompt,
-      ]);
+      // Queue the Gemini call and retry on rate limits
+      const roomBrief = await geminiQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log(`[StagingAnalyze] Queued Gemini call for ${resolvedVibe} starting...`);
+          const result = await model.generateContent([
+            { inlineData: { mimeType, data: base64Match[1] } },
+            architectPrompt,
+          ]);
+          return result.response.text().trim();
+        })
+      );
 
-      const prompt = result.response.text().trim();
-      console.log(`[StagingAnalyze] Generated ${targetVibe} prompt (${prompt.length} chars)`);
-      res.json({ prompt, vibe: targetVibe });
+      const prompt = buildStagingPrompt({
+        vibe: resolvedVibe,
+        roomDescription: roomBrief,
+        constraints: [
+          "interior designer only",
+          "no renovation",
+          "no carpentry",
+          "no layout change",
+        ],
+      });
+
+      console.log(`[StagingAnalyze] Generated ${resolvedVibe} prompt (${prompt.length} chars)`);
+      // Return both the prompt and the original image data for use in image-to-image generation
+      res.json({ prompt, vibe: resolvedVibe, referenceImage: imageData });
     } catch (error: any) {
       console.error("[StagingAnalyze] Error:", error.message);
-      if (error.message?.includes("429") || error.message?.includes("quota")) {
-        return res.status(429).json({ message: "Gemini API rate limit exceeded. Your free tier quota has been used up. Please wait a minute and try again, or upgrade your Google AI billing at ai.google.dev." });
+      if (error.message?.includes("429") || error.message?.includes("quota") || error.message?.includes("Resource exhausted")) {
+        return res.status(429).json({ message: "Gemini API rate limit hit. The request has been retried automatically but the quota is still exhausted. Please wait a minute and try again." });
       }
       res.status(500).json({ message: "Failed to analyze room" });
     }
@@ -852,38 +1317,162 @@ QUALITY: Architectural Digest photography, 8k resolution, highly detailed textur
 
   app.post("/api/admin/staging-generate", requireAdmin, async (req, res) => {
     try {
-      const { prompt, vibe } = req.body;
-      if (!prompt) {
-        return res.status(400).json({ message: "Prompt is required" });
+      const { prompt, vibe, referenceImage, propertyId } = req.body;
+      if (!prompt || !propertyId) {
+        return res.status(400).json({ message: "Prompt and propertyId are required" });
       }
+      const promptVibe = VIBES.includes(vibe as Vibe) ? (vibe as Vibe) : "Classicist";
+      const normalizedPrompt = buildStagingPrompt({
+        vibe: promptVibe,
+        roomDescription: String(prompt),
+        constraints: [
+          "interior designer only",
+          "no renovation",
+          "no carpentry",
+          "no layout change",
+        ],
+      });
 
-      console.log(`[StagingGenerate] Starting image generation for ${vibe || "custom"} vibe`);
+      // Create a staging result record immediately with status "processing"
+      const stagingRecord = await storage.createStagingResult({
+        propertyId,
+        vibe: promptVibe,
+        status: "processing",
+        progressStep: "Analyzing Room",
+      });
 
-      const result = await generateStagedImage(prompt);
+      console.log(`[StagingGenerate] Job ${stagingRecord.id} started for property ${propertyId}, vibe: ${promptVibe}`);
 
-      if (!result.success) {
-        if (result.safetyBlocked) {
-          return res.status(400).json({ 
-            message: result.error,
-            safetyBlocked: true 
-          });
-        }
-        return res.status(500).json({ message: result.error });
-      }
-
-      // Return the base64 image data
-      const imageDataUrl = `data:image/png;base64,${result.imageData}`;
-      
-      console.log(`[StagingGenerate] Image generated successfully (${result.imageData?.length || 0} bytes)`);
-      
-      res.json({ 
+      // Return immediately to the client - don't await the AI call
+      res.json({
         success: true,
-        imageUrl: imageDataUrl,
-        vibe: vibe || "custom"
+        message: "Job Started",
+        resultId: stagingRecord.id,
+        vibe: promptVibe,
+      });
+
+      // Fire and forget: Process the image generation in the background
+      processImageGenerationJob(stagingRecord.id, normalizedPrompt, promptVibe, referenceImage).catch((error) => {
+        console.error(`[StagingGenerate] Background job ${stagingRecord.id} failed:`, error);
       });
     } catch (error: any) {
       console.error("[StagingGenerate] Error:", error.message);
-      res.status(500).json({ message: "Failed to generate staged image" });
+      res.status(500).json({ message: "Failed to create staging job" });
+    }
+  });
+
+  // Background worker for image generation
+  async function processImageGenerationJob(
+    resultId: number,
+    prompt: string,
+    vibe: string,
+    referenceImage: string
+  ): Promise<void> {
+    try {
+      // Update progress: Analyzing Room
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Analyzing Room",
+        status: "processing",
+      });
+
+      console.log(`[StagingWorker] Job ${resultId} - Analyzing room...`);
+
+      // Call the image generation
+      console.log(`[StagingWorker] Job ${resultId} - Calling Vertex AI...`);
+
+      // Update progress: Rendering
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Rendering Lighting",
+      });
+
+      // Queue the Vertex AI call so only one runs at a time, with retry on rate limits
+      const result = await vertexQueue.enqueue(() =>
+        withRetry(async () => {
+          console.log(`[StagingWorker] Job ${resultId} - Queued Vertex AI call starting...`);
+          return generateStagedImage(prompt, referenceImage);
+        })
+      );
+
+      if (!result.success) {
+        // Update status: failed
+        await storage.updateStagingResult(resultId, {
+          status: "failed",
+          progressStep: "Failed",
+          errorMessage: result.error || "Unknown error during generation",
+        });
+
+        console.error(`[StagingWorker] Job ${resultId} - Generation failed: ${result.error}`);
+        return;
+      }
+
+      // Update progress: Uploading to storage
+      await storage.updateStagingResult(resultId, {
+        progressStep: "Uploading to Storage",
+      });
+
+      // Upload image to Google Cloud Storage
+      const filename = `staging-${resultId}-${vibe}-${Date.now()}.png`;
+      const publicUrl = await uploadImageToGCS(result.imageData!, filename);
+
+      if (!publicUrl) {
+        // Upload failed, but generation succeeded - store as fallback data URL
+        console.warn(`[StagingWorker] Job ${resultId} - GCS upload failed, using fallback base64 data URL`);
+        const fallbackUrl = `data:image/png;base64,${result.imageData}`;
+        await storage.updateStagingResult(resultId, {
+          status: "completed",
+          progressStep: "Finalizing",
+          imageUrl: fallbackUrl,
+        });
+        return;
+      }
+
+      // Update status: completed with GCS URL
+      await storage.updateStagingResult(resultId, {
+        status: "completed",
+        progressStep: "Finalizing",
+        imageUrl: publicUrl,
+      });
+
+      console.log(`[StagingWorker] Job ${resultId} - Generation completed successfully with GCS URL`);
+    } catch (error: any) {
+      console.error(`[StagingWorker] Job ${resultId} - Unexpected error:`, error.message);
+
+      try {
+        await storage.updateStagingResult(resultId, {
+          status: "failed",
+          progressStep: "Failed",
+          errorMessage: error.message || "Unexpected error",
+        });
+      } catch (updateError) {
+        console.error(`[StagingWorker] Job ${resultId} - Failed to update error status:`, updateError);
+      }
+    }
+  }
+
+  app.get("/api/admin/staging-status/:resultId", requireAdmin, async (req, res) => {
+    try {
+      const resultId = parseInt(req.params.resultId as string);
+      if (isNaN(resultId)) {
+        return res.status(400).json({ message: "Invalid resultId" });
+      }
+
+      const result = await storage.getStagingResult(resultId);
+      if (!result) {
+        return res.status(404).json({ message: "Staging result not found" });
+      }
+
+      res.json({
+        id: result.id,
+        status: result.status,
+        progressStep: result.progressStep,
+        vibe: result.vibe,
+        imageUrl: result.imageUrl,
+        errorMessage: result.errorMessage,
+        createdAt: result.createdAt,
+      });
+    } catch (error: any) {
+      console.error("[StagingStatus] Error:", error.message);
+      res.status(500).json({ message: "Failed to fetch staging status" });
     }
   });
 

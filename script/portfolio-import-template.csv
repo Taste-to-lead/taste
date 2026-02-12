@@ -1,0 +1,2 @@
+address,price,beds,baths,sqft,description,photoUrls,sourceUrl,title
+123 Main St Austin TX,850000,3,2,1900,"Modern light-filled home with clean lines.","https://example.com/photo1.jpg|https://example.com/photo2.jpg",https://example.com/listing/123-main,123 Main St
