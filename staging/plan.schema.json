@@ -1,0 +1,65 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["room", "vibe", "selected_items", "placement_plan", "constraints"],
+  "properties": {
+    "room": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["room_type", "dimensions_ft"],
+      "properties": {
+        "room_type": { "type": "string" },
+        "dimensions_ft": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["length", "width", "ceiling_height"],
+          "properties": {
+            "length": { "type": "number" },
+            "width": { "type": "number" },
+            "ceiling_height": { "type": "number" }
+          }
+        }
+      }
+    },
+    "vibe": { "type": "string" },
+    "selected_items": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item_id", "reason"],
+        "properties": {
+          "item_id": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "placement_plan": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item_id", "zone", "position_notes"],
+        "properties": {
+          "item_id": { "type": "string" },
+          "zone": {
+            "type": "string",
+            "enum": ["Wall A", "Wall B", "Wall C", "Wall D", "Center", "Corner 1", "Corner 2", "Window Wall", "Sofa Zone", "Bed Zone"]
+          },
+          "position_notes": { "type": "string" }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_item_ids_only", "no_new_items"],
+      "properties": {
+        "allowed_item_ids_only": { "type": "boolean" },
+        "no_new_items": { "type": "boolean" }
+      }
+    }
+  }
+}

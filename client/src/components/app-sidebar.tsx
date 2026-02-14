@@ -21,7 +21,6 @@ const navItems = [
   { title: "Dashboard", url: "/agent", icon: LayoutDashboard },
   { title: "Listings", url: "/agent/listings", icon: Building2 },
   { title: "Leads", url: "/agent/leads", icon: Shield },
-  { title: "Staging Lab", url: "/staging", icon: Wand2 },
   { title: "Settings", url: "/agent/settings", icon: Settings },
 ];
 
@@ -74,6 +73,16 @@ export function AppSidebar() {
                     <Link href="/admin" data-testid="nav-admin">
                       <Zap />
                       <span>God Mode</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+              {isAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild isActive={location === "/admin?tab=staging"}>
+                    <Link href="/admin?tab=staging" data-testid="nav-admin-staging">
+                      <Wand2 />
+                      <span>AI Staging</span>
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>

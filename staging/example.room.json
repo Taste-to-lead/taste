@@ -1,0 +1,9 @@
+{
+  "room_type": "living_room",
+  "vibe": "Modern",
+  "dimensions_ft": {
+    "length": 14,
+    "width": 12,
+    "ceiling_height": 9
+  }
+}

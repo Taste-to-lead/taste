@@ -5,6 +5,7 @@ import session from "express-session";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import type { AddressInfo } from "net";
 
 const app = express();
 const httpServer = createServer(app);
@@ -124,9 +125,46 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // Try port 3000 instead of 5000 to avoid Windows conflicts
-  const port = 3000;
-  httpServer.listen(port, () => {
-    console.log(`Server started on port ${port}`);
-  });
+  const preferredPort = Number(process.env.PORT) || 3000;
+  const maxPortAttempts = 20;
+
+  const tryListen = (port: number) =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (error: NodeJS.ErrnoException) => {
+        httpServer.off("listening", onListening);
+        reject(error);
+      };
+
+      const onListening = () => {
+        httpServer.off("error", onError);
+        resolve();
+      };
+
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(port);
+    });
+
+  let started = false;
+  for (let attempt = 0; attempt < maxPortAttempts; attempt++) {
+    const port = preferredPort + attempt;
+    try {
+      await tryListen(port);
+      started = true;
+      const address = httpServer.address() as AddressInfo | null;
+      const activePort = address?.port ?? port;
+      console.log(`Server started on port ${activePort}`);
+      break;
+    } catch (error: any) {
+      if (error?.code !== "EADDRINUSE") {
+        throw error;
+      }
+    }
+  }
+
+  if (!started) {
+    throw new Error(
+      `Unable to start server: ports ${preferredPort} to ${preferredPort + maxPortAttempts - 1} are in use`,
+    );
+  }
 })();

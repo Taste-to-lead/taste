@@ -20,7 +20,6 @@ import PortfolioPage from "@/pages/portfolio";
 import FeedPage from "@/pages/feed";
 import MePage from "@/pages/me";
 import AgentLeadsPage from "@/pages/agent-leads";
-import StagingLab from "@/pages/StagingLab";
 
 function AgentLayout({ children }: { children: React.ReactNode }) {
   const style = {
@@ -70,7 +69,9 @@ function Router() {
       <Route path="/" component={Consumer} />
       <Route path="/feed" component={FeedPage} />
       <Route path="/me" component={MePage} />
-      <Route path="/staging" component={StagingLab} />
+      <Route path="/staging">
+        <Redirect to="/admin?tab=staging" />
+      </Route>
       <Route path="/login" component={Login} />
       <Route path="/agent">
         <ProtectedRoute>

@@ -1,0 +1,73 @@
+﻿{
+  "room": {
+    "room_type": "living_room",
+    "dimensions_ft": {
+      "length": 14,
+      "width": 12,
+      "ceiling_height": 9
+    }
+  },
+  "vibe": "Modern",
+  "selected_items": [
+    {
+      "item_id": "rug_001",
+      "reason": "Selected for Modern; rug size 108x144 in (index 2, large tier)."
+    },
+    {
+      "item_id": "light_floor_001",
+      "reason": "Selected as direct vibe match for Modern."
+    },
+    {
+      "item_id": "art_001",
+      "reason": "Selected as direct vibe match for Modern."
+    },
+    {
+      "item_id": "drape_001",
+      "reason": "Selected as direct vibe match for Modern."
+    },
+    {
+      "item_id": "plant_002",
+      "reason": "Selected as direct vibe match for Modern."
+    },
+    {
+      "item_id": "chair_001",
+      "reason": "Selected as direct vibe match for Modern."
+    }
+  ],
+  "placement_plan": [
+    {
+      "item_id": "rug_001",
+      "zone": "Center",
+      "position_notes": "Center anchor rug using 108x144 in (index 2, large tier)."
+    },
+    {
+      "item_id": "light_floor_001",
+      "zone": "Corner 1",
+      "position_notes": "Place near sofa corner; creates cozy zone."
+    },
+    {
+      "item_id": "art_001",
+      "zone": "Wall A",
+      "position_notes": "Primary art focal point on Wall A, centered at eye level."
+    },
+    {
+      "item_id": "drape_001",
+      "zone": "Window Wall",
+      "position_notes": "Mount high and wide across window wall to elongate height."
+    },
+    {
+      "item_id": "plant_002",
+      "zone": "Corner 2",
+      "position_notes": "Strong lines; good for industrial/modern."
+    },
+    {
+      "item_id": "chair_001",
+      "zone": "Corner 2",
+      "position_notes": "Use when vibe needs softness."
+    }
+  ],
+  "constraints": {
+    "allowed_item_ids_only": true,
+    "no_new_items": true
+  }
+}

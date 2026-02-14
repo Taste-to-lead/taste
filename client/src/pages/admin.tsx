@@ -217,7 +217,13 @@ function StagingTab() {
 
 export default function Admin() {
   const { isAdmin, isLoading } = useAuth();
-  const [activeTab, setActiveTab] = useState<TabId>("agents");
+  const initialTab: TabId = (() => {
+    if (typeof window === "undefined") return "agents";
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    if (tab === "agents" || tab === "listings" || tab === "staging") return tab;
+    return "agents";
+  })();
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab);
 
   if (isLoading) {
     return (
