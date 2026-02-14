@@ -8,4 +8,4 @@ nixPkgs = ['nodejs', 'npm']
 cmds = ['npm install', 'npm run build']
 
 [start]
-cmd = 'npm run dev'
+cmd = 'node dist/index.cjs'
