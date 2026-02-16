@@ -16,6 +16,7 @@ type MultipartFile = {
 };
 
 const ROOM_TYPES: RoomType[] = ["living", "bed", "kitchen", "bath", "office", "dining", "other"];
+const VIBES_SET = new Set<string>(VIBES);
 
 async function parseMultipart(req: Request): Promise<{ fields: Record<string, string>; file: MultipartFile }> {
   const contentType = req.headers["content-type"] || "";
@@ -114,10 +115,26 @@ export function registerStagingRoutes(app: Express): void {
       const agentId = fields.agentId || null;
       const buyerId = fields.buyerId || null;
       const roomNotes = fields.roomNotes || "";
+      let selectedVibes: VibeId[] = [...VIBES];
+      if (fields.vibes) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(fields.vibes);
+        } catch {
+          return res.status(400).json({ message: "vibes must be valid JSON array" });
+        }
+        if (!Array.isArray(parsed)) {
+          return res.status(400).json({ message: "vibes must be an array" });
+        }
+        if (!parsed.every((v) => typeof v === "string" && VIBES_SET.has(v))) {
+          return res.status(400).json({ message: "vibes contains invalid vibe id(s)" });
+        }
+        selectedVibes = parsed as VibeId[];
+      }
 
       const jobs: Array<{ jobId: string; vibeId: VibeId; status: string }> = [];
 
-      for (const vibeId of VIBES) {
+      for (const vibeId of selectedVibes) {
         const jobId = crypto.randomUUID();
         const built = buildStagingPrompt({
           vibeId,

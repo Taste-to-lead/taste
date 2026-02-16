@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { VIBES, type Vibe } from "@shared/tasteAlgorithm";
 
 type BatchJob = {
   jobId: string;
@@ -24,6 +25,7 @@ export default function StagingLab() {
   const [file, setFile] = useState<File | null>(null);
   const [roomType, setRoomType] = useState<(typeof ROOM_TYPES)[number]>("living");
   const [strictness, setStrictness] = useState<"normal" | "strict">("normal");
+  const [selectedVibes, setSelectedVibes] = useState<Vibe[]>([...VIBES]);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<BatchJob[]>([]);
 
@@ -34,6 +36,7 @@ export default function StagingLab() {
       fd.append("image", file);
       fd.append("roomType", roomType);
       fd.append("strictness", strictness);
+      fd.append("vibes", JSON.stringify(selectedVibes));
       const res = await fetch("/api/staging/stage", {
         method: "POST",
         body: fd,
@@ -47,6 +50,12 @@ export default function StagingLab() {
       setJobs(data.jobs);
     },
   });
+
+  const toggleVibe = (vibe: Vibe) => {
+    setSelectedVibes((prev) =>
+      prev.includes(vibe) ? prev.filter((v) => v !== vibe) : [...prev, vibe]
+    );
+  };
 
   const { data: batchData } = useQuery<BatchResponse>({
     queryKey: ["/api/staging/batch", batchId],
@@ -65,6 +74,32 @@ export default function StagingLab() {
   });
 
   const visibleJobs = useMemo(() => batchData?.jobs || jobs, [batchData, jobs]);
+
+  const exportStagedImages = () => {
+    if (!batchId || visibleJobs.length === 0) return;
+    const downloadable = visibleJobs.filter((job) => !!job.outputImageUrl);
+    for (const job of downloadable) {
+      const imageUrl = job.outputImageUrl!;
+      let ext = "png";
+      const dataUrlMime = imageUrl.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,/i)?.[1];
+      if (dataUrlMime) {
+        ext = dataUrlMime.toLowerCase().includes("jpeg") ? "jpg" : dataUrlMime.toLowerCase();
+      } else {
+        const pathExt = imageUrl.match(/\.([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
+        if (pathExt) {
+          const normalized = pathExt.toLowerCase();
+          ext = normalized === "jpeg" ? "jpg" : normalized;
+        }
+      }
+
+      const link = document.createElement("a");
+      link.href = imageUrl;
+      link.download = `staging-${batchId}-${job.vibeId}.${ext}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
 
   return (
     <div className="p-6 space-y-6 max-w-6xl mx-auto">
@@ -92,14 +127,46 @@ export default function StagingLab() {
           </select>
         </div>
 
-        <Button onClick={() => stageMutation.mutate()} disabled={!file || stageMutation.isPending}>
-          Generate 8 Vibes
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium">Vibes to generate</p>
+            <p className="text-xs text-muted-foreground">Selected: {selectedVibes.length} / {VIBES.length}</p>
+          </div>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setSelectedVibes([...VIBES])}>
+              Select All
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setSelectedVibes([])}>
+              Select None
+            </Button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {VIBES.map((vibe) => (
+              <label key={vibe} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedVibes.includes(vibe)}
+                  onChange={() => toggleVibe(vibe)}
+                />
+                <span>{vibe}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <Button onClick={() => stageMutation.mutate()} disabled={!file || stageMutation.isPending || selectedVibes.length === 0}>
+          Generate {selectedVibes.length} Vibes
         </Button>
       </Card>
 
       {batchId && (
         <Card className="p-4">
-          <p className="text-sm text-muted-foreground">Batch ID: {batchId}</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">Batch ID: {batchId}</p>
+            <Button type="button" variant="outline" size="sm" onClick={exportStagedImages} disabled={visibleJobs.length === 0}>
+              Export Images (PNG/JPG)
+            </Button>
+          </div>
         </Card>
       )}
 
@@ -113,7 +180,7 @@ export default function StagingLab() {
                   <p className="text-xs uppercase text-muted-foreground">{job.status}</p>
                 </div>
                 {job.outputImageUrl ? (
-                  <img src={job.outputImageUrl} alt={`${job.vibeId} staging`} className="w-full h-40 object-cover rounded" />
+                  <img src={job.outputImageUrl} alt={`${job.vibeId} staging`} className="max-w-full h-auto rounded" />
                 ) : (
                   <div className="w-full h-40 bg-muted rounded flex items-center justify-center text-sm text-muted-foreground">
                     {job.status}

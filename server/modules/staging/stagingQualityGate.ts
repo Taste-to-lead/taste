@@ -1,12 +1,27 @@
 import { HARD_CONSTRAINT_BLOCK } from "./promptBuilder";
 
-const REQUIRED_PHRASES = [
-  "Preserve the room’s architecture and geometry",
-  "Keep the same camera angle",
-  "Do not renovate",
-  "Do not change floors, walls, windows, doors, ceiling, or built-ins",
-  "Only add furniture, decor, lighting, rugs, textiles, plants, and art",
-];
+const REQUIRED_CONCEPTS = [
+  {
+    name: "camera_preservation",
+    all: ["camera"],
+    any: ["angle", "perspective", "viewpoint"],
+  },
+  {
+    name: "architecture_preservation",
+    all: ["preserve"],
+    any: ["walls", "windows", "doors", "ceiling", "built-ins"],
+  },
+  {
+    name: "no_renovation",
+    all: ["do not"],
+    any: ["renovate", "remodel", "structural"],
+  },
+  {
+    name: "allowed_additions_only",
+    all: ["only"],
+    any: ["furniture", "decor", "rugs", "lighting", "art", "plants"],
+  },
+] as const;
 
 const RENOVATION_TERMS = [
   "knock down wall",
@@ -33,9 +48,11 @@ export function assessPromptForBannedTerms(prompt: string, negativePrompt: strin
     flags.push("missing_hard_constraint_block");
   }
 
-  for (const phrase of REQUIRED_PHRASES) {
-    if (!prompt.includes(phrase)) {
-      flags.push(`missing_required_phrase:${phrase}`);
+  for (const concept of REQUIRED_CONCEPTS) {
+    const hasAll = concept.all.every((token) => lowerPrompt.includes(token));
+    const hasAny = concept.any.some((token) => lowerPrompt.includes(token));
+    if (!hasAll || !hasAny) {
+      flags.push(`missing_required_concept:${concept.name}`);
     }
   }
 
@@ -63,3 +80,4 @@ export function assessOutputMetadataIfAvailable(providerMeta: any): string[] {
   }
   return flags;
 }
+

@@ -250,7 +250,7 @@ export default function Admin() {
           <Zap className="w-5 h-5 text-primary" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-admin-title">God Mode</h1>
+          <h1 className="text-2xl font-bold tracking-tight" data-testid="text-admin-title">Admin Console</h1>
           <p className="text-sm text-muted-foreground">Platform administration</p>
         </div>
       </div>

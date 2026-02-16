@@ -72,7 +72,7 @@ export function AppSidebar() {
                   <SidebarMenuButton asChild isActive={location === "/admin"}>
                     <Link href="/admin" data-testid="nav-admin">
                       <Zap />
-                      <span>God Mode</span>
+                      <span>Admin Console</span>
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>

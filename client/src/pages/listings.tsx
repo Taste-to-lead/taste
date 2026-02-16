@@ -65,10 +65,13 @@ function LifestyleSelector({ value, onChange }: { value: string[], onChange: (va
   );
 }
 
-function PropertyCard({ property, onEdit, onDelete }: {
+function PropertyCard({ property, onEdit, onDelete, selectionMode = false, selected = false, onToggleSelect }: {
   property: Property;
   onEdit: (p: Property) => void;
   onDelete: (p: Property) => void;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (id: number) => void;
 }) {
   const imgSrc = property.images?.[0] || "/images/property-1.png";
 
@@ -80,6 +83,17 @@ function PropertyCard({ property, onEdit, onDelete }: {
           alt={property.title}
           className="w-full h-48 object-cover transition-transform duration-500 group-hover:scale-105"
         />
+        {selectionMode && (
+          <label className="absolute top-3 left-3 inline-flex items-center gap-1.5 px-2 py-1 rounded bg-black/60 text-white text-xs">
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={() => onToggleSelect?.(property.id)}
+              data-testid={`checkbox-select-property-${property.id}`}
+            />
+            <span>Select</span>
+          </label>
+        )}
         <div className="absolute top-3 right-3">
           <Badge variant={property.status === "active" ? "default" : "secondary"} data-testid={`badge-status-${property.id}`}>
             {property.status === "active" ? "Active" : "Sold"}
@@ -136,6 +150,8 @@ export default function Listings() {
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importUrl, setImportUrl] = useState("");
   const [imageUrl, setImageUrl] = useState("");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPropertyIds, setSelectedPropertyIds] = useState<number[]>([]);
   const { toast } = useToast();
   const { isPremium, isSuperAdmin } = useAuth();
   const canUsePremiumFeatures = isPremium || isSuperAdmin;
@@ -248,6 +264,27 @@ export default function Listings() {
     },
   });
 
+  const batchDeleteMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.allSettled(
+        ids.map((id) => apiRequest("DELETE", `/api/properties/${id}`))
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        throw new Error(`${failed} delete request(s) failed`);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/properties"] });
+      setSelectedPropertyIds([]);
+      setSelectionMode(false);
+      toast({ title: "Selected listings deleted successfully" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Batch delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const handleEdit = (property: Property) => {
     setEditingProperty(property);
     form.reset({
@@ -305,8 +342,24 @@ export default function Listings() {
     form.setValue("images", current.filter((_, i) => i !== index));
   };
 
+  const makeCoverImage = (index: number) => {
+    const current = form.getValues("images") || [];
+    if (index < 0 || index >= current.length) return;
+    const selected = current[index];
+    const reordered = [selected, ...current.filter((_, i) => i !== index)];
+    form.setValue("images", reordered);
+  };
+
   const isFormOpen = showForm || editingProperty !== null;
   const isPending = createMutation.isPending || updateMutation.isPending;
+  const allPropertyIds = (properties || []).map((p) => p.id);
+  const allSelected = allPropertyIds.length > 0 && allPropertyIds.every((id) => selectedPropertyIds.includes(id));
+
+  const toggleSelectProperty = (id: number) => {
+    setSelectedPropertyIds((prev) =>
+      prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]
+    );
+  };
 
   const formContent = (
     <Form {...form}>
@@ -497,6 +550,14 @@ export default function Listings() {
                   <img src={url} alt={`Preview ${i}`} className="w-full h-20 object-cover" />
                   <button
                     type="button"
+                    onClick={() => makeCoverImage(i)}
+                    className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-[10px] text-white"
+                    data-testid={`button-make-cover-image-${i}`}
+                  >
+                    {i === 0 ? "Cover" : "Make Cover"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => removeImage(i)}
                     className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center visibility-visible"
                     data-testid={`button-remove-image-${i}`}
@@ -547,6 +608,38 @@ export default function Listings() {
           <p className="text-muted-foreground text-sm mt-1">{properties?.length ?? 0} properties in your portfolio</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setSelectionMode((prev) => !prev);
+              if (selectionMode) setSelectedPropertyIds([]);
+            }}
+            data-testid="button-select-batch-delete"
+          >
+            {selectionMode ? "Cancel Selection" : "Select for Batch Delete"}
+          </Button>
+          {selectionMode && (
+            <Button
+              variant="outline"
+              onClick={() => setSelectedPropertyIds(allSelected ? [] : allPropertyIds)}
+              disabled={allPropertyIds.length === 0}
+              data-testid="button-select-all-listings"
+            >
+              {allSelected ? "Clear Selection" : "Select All"}
+            </Button>
+          )}
+          {selectionMode && (
+            <Button
+              variant="destructive"
+              onClick={() => batchDeleteMutation.mutate(selectedPropertyIds)}
+              disabled={selectedPropertyIds.length === 0 || batchDeleteMutation.isPending}
+              data-testid="button-delete-selected-listings"
+            >
+              {batchDeleteMutation.isPending
+                ? "Deleting..."
+                : `Delete Selected (${selectedPropertyIds.length})`}
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => {
@@ -668,6 +761,9 @@ export default function Listings() {
               property={p}
               onEdit={handleEdit}
               onDelete={(p) => setDeletingProperty(p)}
+              selectionMode={selectionMode}
+              selected={selectedPropertyIds.includes(p.id)}
+              onToggleSelect={toggleSelectProperty}
             />
           ))}
         </div>

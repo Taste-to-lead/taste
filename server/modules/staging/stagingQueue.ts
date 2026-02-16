@@ -6,6 +6,13 @@ import { assessOutputMetadataIfAvailable, assessPromptForBannedTerms } from "./s
 import { generateStagedImageWithProvider } from "./stagingProvider";
 import type { StagingJobStatus } from "./stagingTypes";
 
+const MIN_INTERVAL_MS = 8000;
+let lastRequestAt = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type QueueJob = {
   jobId: string;
   inputImageUrl: string;
@@ -27,7 +34,7 @@ class StagingQueue {
   private queue: QueueJob[] = [];
   private readonly jobState = new Map<string, JobState>();
 
-  constructor(concurrency = 2) {
+  constructor(concurrency = 1) {
     this.concurrency = concurrency;
   }
 
@@ -105,14 +112,23 @@ class StagingQueue {
           usedNegativePrompt = `${job.negativePrompt}, ABSOLUTELY NO ARCHITECTURAL CHANGES`;
           await this.updateJob(job.jobId, { negativePromptUsed: usedNegativePrompt });
         }
+
+        const now = Date.now();
+        const elapsed = now - lastRequestAt;
+        if (elapsed < MIN_INTERVAL_MS) {
+          await sleep(MIN_INTERVAL_MS - elapsed);
+        }
+
         const generated = await generateStagedImageWithProvider({
           inputImageUrl: job.inputImageUrl,
           prompt: job.prompt,
           negativePrompt: usedNegativePrompt,
         });
+        lastRequestAt = Date.now();
         outputUrl = generated.outputImageUrl;
         providerMeta = generated.providerMeta;
       } catch (error: any) {
+        lastRequestAt = Date.now();
         lastError = error?.message || "generation_failed";
         attempt++;
       }
@@ -157,4 +173,4 @@ class StagingQueue {
   }
 }
 
-export const stagingQueue = new StagingQueue(2);
+export const stagingQueue = new StagingQueue(1);

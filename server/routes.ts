@@ -10,12 +10,146 @@ import { sendEmail, buildMatchEmailHtml } from "./notificationService";
 import { classifyPropertyImage } from "./geminiTagger";
 import { importFromUrl } from "./webScraper";
 import { VIBES, VIBE_DEFINITIONS, computeMatchScore, computeTasteScore, computeBuyerVibeVector, computeVectorMatchScore, type Vibe, type BuyerSwipeAction } from "@shared/tasteAlgorithm";
-import { extractListingsFromPortfolioUrl, parseCsvMultipart, runPortfolioImportJob, csvRowsToListings, URL_IMPORT_FAIL_MESSAGE } from "./portfolioImport";
+import { parseCsvMultipart, runPortfolioImportJob, csvRowsToListings, URL_IMPORT_FAIL_MESSAGE } from "./portfolioImport";
+import { runUrlImportPipeline, type ListingDraft, type UrlImportMode, type UrlImportReasonCode } from "./modules/import/urlImportStrategies";
 import { registerStagingRoutes } from "./modules/staging/stagingRoutes";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 
 const SUPER_ADMIN_EMAIL = "vinnysladeb@gmail.com";
+const IMPORT_SOURCES = ["local", "url"] as const;
+const IMPORT_TYPES = ["listings", "sold", "rentals", "mixed"] as const;
+const LOCAL_EXTENSIONS = ["csv", "xlsx", "json", "xml", "zip", "pdf", "jpg", "png"] as const;
+const URL_TYPES = ["single_listing", "agent_portfolio", "brokerage_page", "feed_endpoint"] as const;
+const URL_PARSER_STRATEGIES = ["auto", "agent_site_crawl", "generic_page"] as const;
+const URL_IMPORT_MODES = ["auto", "single", "portfolio"] as const;
+
+type ImportSource = typeof IMPORT_SOURCES[number];
+type ImportType = typeof IMPORT_TYPES[number];
+type LocalExtension = typeof LOCAL_EXTENSIONS[number];
+type UrlType = typeof URL_TYPES[number];
+type UrlParserStrategy = typeof URL_PARSER_STRATEGIES[number];
+type UrlImportModeLocal = typeof URL_IMPORT_MODES[number];
+
+type PortfolioImportOptions = {
+  importSource: ImportSource;
+  importType: ImportType;
+  localExtensions: LocalExtension[];
+  urlType: UrlType;
+  urlParserStrategy: UrlParserStrategy;
+};
+
+type ImportJobStatusRuntime = {
+  status: "queued" | "running" | "done" | "failed";
+  progress: number;
+  stage: string;
+  counts: Record<string, number>;
+  error: string | null;
+  reasonCode?: UrlImportReasonCode;
+  triedStrategies?: string[];
+  debug?: {
+    httpStatus?: number;
+    contentType?: string;
+    htmlHead?: string;
+    finalUrl?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+const importJobRuntime = new Map<string, ImportJobStatusRuntime>();
+
+function setImportRuntime(
+  jobId: string,
+  patch: Partial<Omit<ImportJobStatusRuntime, "createdAt">>
+): ImportJobStatusRuntime {
+  const now = new Date().toISOString();
+  const existing = importJobRuntime.get(jobId);
+  const next: ImportJobStatusRuntime = {
+    status: existing?.status || "queued",
+    progress: existing?.progress ?? 0,
+    stage: existing?.stage || "queued",
+    counts: existing?.counts || {},
+    error: existing?.error ?? null,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    ...patch,
+  };
+  importJobRuntime.set(jobId, next);
+  return next;
+}
+
+function isOneOf<T extends readonly string[]>(value: string, options: T): value is T[number] {
+  return (options as readonly string[]).includes(value);
+}
+
+function validatePortfolioImportOptions(raw: {
+  importSource?: unknown;
+  importType?: unknown;
+  localExtensions?: unknown;
+  urlType?: unknown;
+  urlParserStrategy?: unknown;
+}): PortfolioImportOptions {
+  const importSourceRaw = typeof raw.importSource === "string" ? raw.importSource : "local";
+  if (!isOneOf(importSourceRaw, IMPORT_SOURCES)) {
+    throw new Error("importSource must be one of: local, url");
+  }
+
+  const importTypeRaw = typeof raw.importType === "string" ? raw.importType : "listings";
+  if (!isOneOf(importTypeRaw, IMPORT_TYPES)) {
+    throw new Error("importType must be one of: listings, sold, rentals, mixed");
+  }
+
+  let localExtensionsRaw: unknown = raw.localExtensions;
+  if (localExtensionsRaw == null) {
+    localExtensionsRaw = [...LOCAL_EXTENSIONS];
+  }
+  if (typeof localExtensionsRaw === "string") {
+    try {
+      localExtensionsRaw = JSON.parse(localExtensionsRaw);
+    } catch {
+      throw new Error("localExtensions must be a valid JSON array");
+    }
+  }
+  if (!Array.isArray(localExtensionsRaw)) {
+    throw new Error("localExtensions must be an array");
+  }
+  const localExtensionsValidated: LocalExtension[] = [];
+  for (const ext of localExtensionsRaw) {
+    if (typeof ext !== "string" || !isOneOf(ext, LOCAL_EXTENSIONS)) {
+      throw new Error("localExtensions contains invalid values");
+    }
+    if (!localExtensionsValidated.includes(ext)) {
+      localExtensionsValidated.push(ext);
+    }
+  }
+
+  const urlTypeRaw = typeof raw.urlType === "string" ? raw.urlType : "single_listing";
+  if (!isOneOf(urlTypeRaw, URL_TYPES)) {
+    throw new Error("urlType must be one of: single_listing, agent_portfolio, brokerage_page, feed_endpoint");
+  }
+
+  const urlParserStrategyRaw = typeof raw.urlParserStrategy === "string" ? raw.urlParserStrategy : "auto";
+  if (!isOneOf(urlParserStrategyRaw, URL_PARSER_STRATEGIES)) {
+    throw new Error("urlParserStrategy must be one of: auto, agent_site_crawl, generic_page");
+  }
+
+  return {
+    importSource: importSourceRaw,
+    importType: importTypeRaw,
+    localExtensions: localExtensionsValidated,
+    urlType: urlTypeRaw,
+    urlParserStrategy: urlParserStrategyRaw,
+  };
+}
+
+function validateUrlImportMode(raw: unknown): UrlImportModeLocal {
+  const value = typeof raw === "string" ? raw : "auto";
+  if (!isOneOf(value, URL_IMPORT_MODES)) {
+    throw new Error("urlImportMode must be one of: auto, single, portfolio");
+  }
+  return value;
+}
 
 const buyerSwipeSchema = z.object({
   buyerId: z.string().min(1),
@@ -65,6 +199,39 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   registerStagingRoutes(app);
+
+  app.get("/api/import/status", requireAgent, async (req, res) => {
+    try {
+      const jobId = typeof req.query.jobId === "string" ? req.query.jobId.trim() : "";
+      if (!jobId) return res.status(400).json({ message: "jobId is required" });
+      const job = await storage.getImportJob(jobId);
+      if (!job) return res.status(404).json({ message: "Import job not found" });
+      const runtime = importJobRuntime.get(jobId);
+      const progressFallback = job.status === "done" ? 100 : job.status === "failed" ? Math.min(99, runtime?.progress ?? 0) : 0;
+      const stageFallback = job.status === "done" ? "done" : job.status === "failed" ? "failed" : job.status;
+      return res.json({
+        id: job.id,
+        agentId: job.agentId,
+        status: (runtime?.status || job.status) as "queued" | "running" | "done" | "failed",
+        progress: runtime?.progress ?? progressFallback,
+        stage: runtime?.stage || stageFallback,
+        counts: runtime?.counts || {
+          total: job.total,
+          processed: job.processed,
+          succeeded: job.succeeded,
+          failedCount: job.failedCount,
+        },
+        error: runtime?.error ?? job.error ?? null,
+        reasonCode: runtime?.reasonCode,
+        triedStrategies: runtime?.triedStrategies || [],
+        debug: runtime?.debug,
+        createdAt: runtime?.createdAt || job.createdAt,
+        updatedAt: runtime?.updatedAt || job.updatedAt,
+      });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
 
 
   app.get("/about", (_req, res) => {
@@ -829,12 +996,33 @@ export async function registerRoutes(
       const bodyAgentId = typeof req.body?.agentId === "string" ? req.body.agentId.trim() : "";
       const agentId = bodyAgentId || String(req.session.agentId!);
       const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
+      const urlImportMode = validateUrlImportMode(req.body?.urlImportMode);
+      const importOptions = validatePortfolioImportOptions({
+        importSource: req.body?.importSource,
+        importType: req.body?.importType,
+        localExtensions: req.body?.localExtensions,
+        urlType: req.body?.urlType,
+        urlParserStrategy: req.body?.urlParserStrategy,
+      });
 
       if (!url || !/^https?:\/\//i.test(url)) {
         return res.status(400).json({ message: "A valid URL is required" });
       }
+      if (importOptions.importSource !== "url") {
+        return res.status(400).json({ message: "importSource must be 'url' for this endpoint" });
+      }
 
       const jobId = crypto.randomUUID();
+      setImportRuntime(jobId, {
+        status: "queued",
+        progress: 0,
+        stage: "queued",
+        counts: { discovered: 0, fetched: 0, parsed: 0 },
+        error: null,
+        reasonCode: undefined,
+        triedStrategies: [],
+        debug: undefined,
+      });
       await storage.createImportJob({
         id: jobId,
         agentId,
@@ -848,14 +1036,134 @@ export async function registerRoutes(
         error: null,
       } as any);
 
-      res.status(202).json({ jobId });
+      console.log("[PortfolioImport] URL import options:", { jobId, agentId, urlImportMode, ...importOptions });
+      res.status(202).json({ jobId, importOptions, urlImportMode });
 
       setImmediate(async () => {
         try {
-          const listings = await extractListingsFromPortfolioUrl(url);
-          await runPortfolioImportJob(jobId, agentId, listings);
+          setImportRuntime(jobId, {
+            status: "running",
+            progress: 5,
+            stage: "fetching",
+            reasonCode: undefined,
+            triedStrategies: [],
+            debug: undefined,
+          });
+
+          const pipeline = await runUrlImportPipeline(url, urlImportMode as UrlImportMode, {
+            maxCandidatePages: 10,
+            onProgress: async (update) => {
+              setImportRuntime(jobId, {
+                status: "running",
+                progress: update.progress,
+                stage: update.stage,
+                counts: { ...(importJobRuntime.get(jobId)?.counts || {}), ...(update.counts || {}) },
+              });
+            },
+          });
+
+          if (!pipeline.ok) {
+            const runtime = importJobRuntime.get(jobId);
+            const errorMessage = `Couldn't import from that URL. Reason: ${pipeline.reasonCode}`;
+            setImportRuntime(jobId, {
+              status: "failed",
+              stage: "failed",
+              progress: runtime?.progress ?? 0,
+              reasonCode: pipeline.reasonCode,
+              triedStrategies: pipeline.triedStrategies,
+              debug: pipeline.debug,
+              error: errorMessage,
+            });
+            await storage.updateImportJob(jobId, {
+              status: "failed",
+              error: errorMessage,
+              processed: 0,
+              succeeded: 0,
+              failedCount: 0,
+            } as any);
+            return;
+          }
+
+          const listings = pipeline.listings.map((draft: ListingDraft) => ({
+            title: draft.title || draft.address || "Imported listing",
+            address: draft.address || draft.sourceUrl,
+            price: draft.price ?? null,
+            beds: draft.beds ?? null,
+            baths: draft.baths ?? null,
+            sqft: draft.sqft ?? null,
+            description: draft.description || null,
+            photoUrls: draft.images || [],
+            sourceUrl: draft.sourceUrl || url,
+          }));
+
+          setImportRuntime(jobId, {
+            status: "running",
+            progress: 75,
+            stage: "downloading_media",
+            triedStrategies: pipeline.triedStrategies,
+            debug: pipeline.debug,
+          });
+
+          const finalStatus = await runPortfolioImportJob(jobId, agentId, listings, async (update) => {
+            const counts = update.counts || {};
+            const discovered = counts.discovered || listings.length || 1;
+            const processed = counts.processed || 0;
+            const mediaTotal = counts.mediaTotal || discovered;
+            const mediaDownloaded = counts.mediaDownloaded || processed;
+            let stage = update.stage;
+            let progress = update.progress;
+
+            if (update.stage.includes("parsing")) {
+              stage = "parsing_listings";
+              progress = 50 + Math.floor((processed / discovered) * 25);
+            } else if (update.stage.includes("downloading")) {
+              stage = "downloading_media";
+              progress = 75 + Math.floor((mediaDownloaded / mediaTotal) * 15);
+            } else if (update.stage === "saving") {
+              stage = "saving";
+              progress = 95;
+            } else if (update.stage === "done") {
+              stage = "done";
+              progress = 100;
+            }
+
+            setImportRuntime(jobId, {
+              status: "running",
+              progress: Math.max(0, Math.min(100, progress)),
+              stage,
+              counts: {
+                ...(importJobRuntime.get(jobId)?.counts || {}),
+                discovered,
+                fetched: discovered,
+                parsed: processed,
+              },
+            });
+          });
+
+          if (finalStatus === "done") {
+            setImportRuntime(jobId, { status: "done", progress: 100, stage: "done", error: null });
+          } else {
+            const runtime = importJobRuntime.get(jobId);
+            setImportRuntime(jobId, {
+              status: "failed",
+              stage: "failed",
+              progress: runtime?.progress ?? 90,
+              reasonCode: "PARSE_FAILED",
+              triedStrategies: pipeline.triedStrategies,
+              debug: pipeline.debug,
+              error: "All listings failed to import.",
+            });
+          }
         } catch (error: any) {
           const message = error?.message || URL_IMPORT_FAIL_MESSAGE;
+          const runtime = importJobRuntime.get(jobId);
+          setImportRuntime(jobId, {
+            status: "failed",
+            stage: "failed",
+            progress: runtime?.progress ?? 0,
+            reasonCode: "FETCH_FAILED",
+            error: message,
+          });
           await storage.updateImportJob(jobId, {
             status: "failed",
             error: message,
@@ -872,13 +1180,39 @@ export async function registerRoutes(
 
   app.post("/api/portfolio/import/csv", requireAgent, async (req, res) => {
     try {
-      const { agentId, csvText, filename } = await parseCsvMultipart(req);
+      const {
+        agentId,
+        csvText,
+        filename,
+        importSource,
+        importType,
+        localExtensions,
+        urlType,
+        urlParserStrategy,
+      } = await parseCsvMultipart(req);
+      const importOptions = validatePortfolioImportOptions({
+        importSource,
+        importType,
+        localExtensions,
+        urlType,
+        urlParserStrategy,
+      });
+      if (importOptions.importSource !== "local") {
+        return res.status(400).json({ message: "importSource must be 'local' for this endpoint" });
+      }
       const listings = csvRowsToListings(csvText);
       if (listings.length === 0) {
         return res.status(400).json({ message: "CSV did not contain valid rows. 'address' is required." });
       }
 
       const jobId = crypto.randomUUID();
+      setImportRuntime(jobId, {
+        status: "queued",
+        progress: 0,
+        stage: "queued",
+        counts: { discovered: listings.length, processed: 0 },
+        error: null,
+      });
       await storage.createImportJob({
         id: jobId,
         agentId,
@@ -892,11 +1226,38 @@ export async function registerRoutes(
         error: null,
       } as any);
 
-      res.status(202).json({ jobId });
+      console.log("[PortfolioImport] Local import options:", { jobId, agentId, ...importOptions });
+      res.status(202).json({ jobId, importOptions });
       setImmediate(async () => {
         try {
-          await runPortfolioImportJob(jobId, agentId, listings);
+          setImportRuntime(jobId, { status: "running", progress: 30, stage: "parsing listings" });
+          const finalStatus = await runPortfolioImportJob(jobId, agentId, listings, async (update) => {
+            setImportRuntime(jobId, {
+              status: "running",
+              progress: update.progress,
+              stage: update.stage,
+              counts: { ...(importJobRuntime.get(jobId)?.counts || {}), ...(update.counts || {}) },
+            });
+          });
+          if (finalStatus === "done") {
+            setImportRuntime(jobId, { status: "done", progress: 100, stage: "done", error: null });
+          } else {
+            const runtime = importJobRuntime.get(jobId);
+            setImportRuntime(jobId, {
+              status: "failed",
+              stage: "failed",
+              progress: runtime?.progress ?? 90,
+              error: "All listings failed to import.",
+            });
+          }
         } catch (error: any) {
+          const runtime = importJobRuntime.get(jobId);
+          setImportRuntime(jobId, {
+            status: "failed",
+            stage: "failed",
+            progress: runtime?.progress ?? 0,
+            error: error?.message || "CSV import failed",
+          });
           await storage.updateImportJob(jobId, {
             status: "failed",
             error: error?.message || "CSV import failed",

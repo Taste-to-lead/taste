@@ -142,7 +142,7 @@ app.use((req, res, next) => {
 
       httpServer.once("error", onError);
       httpServer.once("listening", onListening);
-      httpServer.listen(port);
+      httpServer.listen(process.env.PORT || 5000, '0.0.0.0');
     });
 
   let started = false;
