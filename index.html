@@ -1,0 +1,573 @@
+Here is the updated V2 Presentation File.
+I have made the two specific edits you requested:
+ * The "Lazy" Hook: Added "all without lifting a finger" to the final CTA to emphasize the "Concierge" benefit.
+ * The Vibe Sliders: I completely rebuilt the Archetypes Grid. Now, instead of one static image, each card is a horizontal scrollable gallery containing 4 distinct images per vibe.
+   * How to use: You can hover over a card and scroll (or swipe on mobile/tablet) to see the different variations of "Monarch," "Industrialist," etc.
+Instructions:
+ * Open your presentation.html file.
+ * Delete everything in it.
+ * Paste this new code code below.
+ * Save and open in Chrome.
+<!-- end list -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Taste to Lead | Vibe Architecture Agency</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Montserrat:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        /* --- GLOBAL RESETS & VARIABLES --- */
+        :root {
+            --bg-dark: #0a0a0a;
+            --bg-secondary: #141414;
+            --text-light: #ffffff;
+            --text-muted: #a0a0a0;
+            --accent-gold: #D4AF37; /* The color of luxury */
+            --section-spacing: 120px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: 'Montserrat', sans-serif;
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        h1, h2, h3, h4 {
+            font-family: 'Cinzel', serif;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+
+        h2 {
+            font-size: 3rem;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        h2 span { color: var(--accent-gold); }
+
+        p.lead {
+            font-size: 1.2rem;
+            color: var(--text-muted);
+            text-align: center;
+            max-width: 800px;
+            margin: 0 auto 60px auto;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        section {
+            padding: var(--section-spacing) 0;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+        }
+
+        /* --- UTILITY CLASSES --- */
+        .text-gold { color: var(--accent-gold); }
+        .text-center { text-align: center; }
+        .flex-center { display: flex; justify-content: center; align-items: center; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; }
+        
+        /* --- HERO SECTION --- */
+        #hero {
+            height: 100vh;
+            background: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.8)), url('https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?auto=format&fit=crop&w=1600&q=80');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 0 20px;
+        }
+
+        #hero h1 {
+            font-size: 4.5rem;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+            line-height: 1.1;
+        }
+
+        #hero p {
+            font-size: 1.5rem;
+            font-weight: 300;
+            max-width: 700px;
+            margin-bottom: 40px;
+        }
+
+        .btn-gold {
+            padding: 15px 40px;
+            background-color: var(--accent-gold);
+            color: var(--bg-dark);
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+        }
+
+        .btn-gold:hover {
+            background-color: #b3932a;
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px -10px rgba(212, 175, 55, 0.5);
+        }
+
+        /* --- THE PHILOSOPHY --- */
+        #philosophy { background-color: var(--bg-secondary); }
+
+        /* --- THE ARCHETYPES GRID (UPDATED WITH SLIDER) --- */
+        #archetypes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            margin-top: 60px;
+        }
+
+        .archetype-card {
+            position: relative;
+            height: 400px; /* Taller to show off images */
+            overflow: hidden;
+            border-radius: 4px;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            transition: all 0.4s ease;
+            background: #000;
+        }
+
+        .archetype-card:hover {
+            border-color: var(--accent-gold);
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px -10px rgba(0,0,0,0.8);
+        }
+
+        /* Horizontal Scrolling Carousel */
+        .carousel {
+            display: flex;
+            overflow-x: auto;
+            scroll-snap-type: x mandatory;
+            height: 100%;
+            width: 100%;
+            /* Hide scrollbar */
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none;  /* IE/Edge */
+        }
+        .carousel::-webkit-scrollbar { display: none; } /* Chrome/Safari */
+
+        .slide {
+            flex: 0 0 100%;
+            width: 100%;
+            height: 100%;
+            background-size: cover;
+            background-position: center;
+            scroll-snap-align: start;
+            position: relative;
+        }
+
+        .slide::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(to top, var(--bg-dark) 10%, transparent 60%);
+        }
+
+        .archetype-info {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            padding: 20px;
+            pointer-events: none; /* Let clicks pass through to scroll */
+            z-index: 10;
+        }
+
+        .archetype-info h3 { 
+            color: var(--accent-gold); 
+            margin-bottom: 8px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        
+        .scroll-hint {
+            font-size: 0.7rem;
+            color: rgba(255,255,255,0.5);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .scroll-hint::before {
+            content: '←'; margin-right: 5px;
+        }
+        .scroll-hint::after {
+            content: '→'; margin-left: 5px;
+        }
+
+        .tags span {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            background: rgba(0,0,0,0.6);
+            border: 1px solid rgba(255,255,255,0.2);
+            padding: 4px 10px;
+            margin-right: 5px;
+            border-radius: 20px;
+            backdrop-filter: blur(4px);
+        }
+
+        /* --- THE SERVICE PILLARS --- */
+        .pillar-section { position: relative; }
+        .pillar-number {
+            font-family: 'Cinzel', serif;
+            font-size: 12rem;
+            position: absolute;
+            top: -60px;
+            left: -20px;
+            opacity: 0.05;
+            color: var(--accent-gold);
+            z-index: -1;
+        }
+        .pillar-content h3 { font-size: 2.2rem; margin-bottom: 20px; }
+        .pillar-content ul { list-style: none; margin-top: 30px; }
+        .pillar-content li {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        .pillar-content li::before {
+            content: '✦';
+            color: var(--accent-gold);
+            margin-right: 15px;
+            font-size: 1.2rem;
+        }
+        .pillar-image img {
+            width: 100%;
+            border-radius: 4px;
+            box-shadow: -20px 20px 0px 0px rgba(212, 175, 55, 0.1);
+        }
+        .pillar-image.alt img { box-shadow: 20px 20px 0px 0px rgba(212, 175, 55, 0.1); }
+
+        /* --- THE POTENTIAL ENGINE (Split View) --- */
+        #potential-engine .split-view {
+            display: flex;
+            height: 500px;
+            border: 2px solid var(--accent-gold);
+        }
+        .split-panel {
+            flex: 1;
+            background-size: cover;
+            background-position: center;
+            position: relative;
+            transition: all 0.5s ease;
+            cursor: crosshair;
+        }
+        .split-panel:hover { flex: 2; }
+        .panel-label {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: var(--bg-dark);
+            padding: 10px 20px;
+            font-family: 'Cinzel';
+            color: var(--accent-gold);
+            text-transform: uppercase;
+        }
+
+        /* --- CTA SECTION --- */
+        #cta {
+            background: linear-gradient(rgba(0,0,0,0.9), rgba(0,0,0,0.9)), url('https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&w=1600&q=80');
+            background-attachment: fixed;
+            background-size: cover;
+            padding: 180px 0;
+        }
+        #cta h2 { font-size: 3.5rem; }
+
+        /* --- FOOTER --- */
+        footer {
+            background: var(--bg-dark);
+            padding: 50px 0;
+            text-align: center;
+            border-top: 1px solid var(--accent-gold);
+        }
+        footer h4 { color: var(--accent-gold); margin-bottom: 20px; }
+
+        /* --- RESPONSIVE --- */
+        @media (max-width: 768px) {
+            #hero h1 { font-size: 2.8rem; }
+            h2 { font-size: 2.2rem; }
+            .grid-2 { grid-template-columns: 1fr; gap: 40px; }
+            .pillar-image.alt { order: 2; } .pillar-content.alt { order: 1; }
+            .pillar-number { font-size: 8rem; top: 0; }
+            #potential-engine .split-view { flex-direction: column; height: 600px; }
+        }
+    </style>
+</head>
+<body>
+
+    <section id="hero">
+        <h1>Stop Selling Square Footage.<br>Start Selling <span class="text-gold">Identity</span>.</h1>
+        <p>The premier "Vibe Architecture" agency for elite real estate portfolios. We use AI to profile homes by psychological archetype, not just bedroom count.</p>
+        <a href="#philosophy" class="btn-gold">Explore The System</a>
+    </section>
+
+    <section id="philosophy">
+        <div class="container">
+            <h2>The <span class="text-gold">Psychology</span> of Luxury</h2>
+            <p class="lead">At the $2M+ price point, nobody buys a house for shelter. They buy it to fulfill an identity. Zillow treats your listings as data points. We treat them as stage sets for your buyer's ego.</p>
+        </div>
+    </section>
+
+    <section id="archetypes">
+        <div class="container">
+            <h2>The 8 Core <span class="text-gold">Vibes</span></h2>
+            <p class="lead">Every buyer has a "Soul Match." We categorize your portfolio into these 8 distinct archetypes. <br><span style="font-size: 0.9rem; color: var(--accent-gold);">(Scroll horizontally on the cards to see variations)</span></p>
+            
+            <div id="archetypes-grid">
+                
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1613490493576-7fde63acd811?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1577495508048-b635879837f1?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1560185127-6ed189bf02f4?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Monarch</h3>
+                        <div class="tags"><span>Opulent</span><span>Gold</span><span>Power</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1554995207-c18c203602cb?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1515263487990-61b07816b324?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1504624720567-64a41aa25d70?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1593019318356-9a2592751509?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Industrialist</h3>
+                        <div class="tags"><span>Raw</span><span>Concrete</span><span>Warehouse</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1493809842364-78817add7ffb?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Purist</h3>
+                        <div class="tags"><span>Minimal</span><span>White</span><span>Disciplined</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1598928506311-c55ded91a20c?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1449844908441-8829872d2607?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1592595896551-12b371d546d5?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1523413651479-597eb2da0ad6?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Naturalist</h3>
+                        <div class="tags"><span>Organic</span><span>Green</span><span>Sanctuary</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                 <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1505691938895-1758d7feb511?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1496664444929-8c75efb9546f?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1510070112810-d4e9a46d9e91?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Futurist</h3>
+                        <div class="tags"><span>Neon</span><span>Tech</span><span>Sleek</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1586023492125-27b2c045efd7?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1554995207-c18c203602cb?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1615529182904-14819c35db37?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1595526114035-0d45ed16cfbf?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Curator</h3>
+                        <div class="tags"><span>Bold</span><span>Artistic</span><span>Gallery</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1540932296774-3ed6d50f06df?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1507089947368-19c1da9775ae?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Nomad</h3>
+                        <div class="tags"><span>Boho</span><span>Eclectic</span><span>Traveler</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+                <div class="archetype-card">
+                    <div class="carousel">
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1564013799919-ab600027ffc6?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1600607686527-6fb886090705?auto=format&fit=crop&w=600&q=80');"></div>
+                        <div class="slide" style="background-image: url('https://images.unsplash.com/photo-1484154218962-a1c002085d2f?auto=format&fit=crop&w=600&q=80');"></div>
+                    </div>
+                    <div class="archetype-info">
+                        <h3>The Classicist</h3>
+                        <div class="tags"><span>Timeless</span><span>Heritage</span><span>Elegant</span></div>
+                        <div class="scroll-hint">Swipe for details</div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+    <section class="pillar-section">
+        <div class="container grid-2">
+            <div class="pillar-content">
+                <span class="pillar-number">I</span>
+                <h3>The <span class="text-gold">Core Tech</span> Engine</h3>
+                <p>The proprietary platform that powers your new brand identity. It’s not a search portal; it’s a psychological matchmaking engine for high-net-worth buyers.</p>
+                <ul>
+                    <li>**The Discovery Feed:** A "swipe-based" interface that gamifies luxury house hunting.</li>
+                    <li>**"No Preference" Exploration:** Captures undecided buyers by showing them what they didn't know they wanted.</li>
+                    <li>**God Mode Dashboard:** Complete control over your portfolio's data and vibes.</li>
+                </ul>
+            </div>
+            <div class="pillar-image">
+                <img src="https://images.unsplash.com/photo-1555421689-491a97ff2040?auto=format&fit=crop&w=800&q=80" alt="Tech Dashboard">
+            </div>
+        </div>
+    </section>
+
+    <section class="pillar-section" style="background-color: var(--bg-secondary);">
+        <div class="container grid-2">
+            <div class="pillar-image alt">
+                <img src="https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80" alt="Luxury Portfolio">
+            </div>
+            <div class="pillar-content alt">
+                <span class="pillar-number" style="left: auto; right: -20px;">II</span>
+                <h3>The <span class="text-gold">White Glove</span> Portfolio Migration</h3>
+                <p>We don't sell you software and hope you figure it out. We are an agency. We handle the entire digital transformation of your inventory.</p>
+                <ul>
+                    <li>**Concierge Import:** We migrate your entire active portfolio from the MLS.</li>
+                    <li>**AI Vibe-Tagging:** Every listing is analyzed and categorized by our algorithm.</li>
+                    <li>**Human Curation:** Our design team manually reviews every tag for perfection.</li>
+                    <li>**Deliverable:** A fully branded, private "Vibe Portfolio" link ready on Day 1.</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <section class="pillar-section">
+        <div class="container grid-2">
+            <div class="pillar-content">
+                <span class="pillar-number">III</span>
+                <h3>The Psychological <span class="text-gold">Content Factory</span></h3>
+                <p>Stop posting boring listing photos. We generate social assets that speak directly to the buyer's desired identity, solving your "what do I post?" problem forever.</p>
+                <ul>
+                    <li>**Branded Vibe Cards:** High-res social assets overlaid with official Vibe Badges (e.g., The Monarch Crest).</li>
+                    <li>**Neuro-Linguistic Copy:** AI-written captions that hook the ego. (e.g., "Stop looking for a house. Start looking for your Empire.")</li>
+                    <li>**Listing Presentation Deck:** A physical asset to show sellers how you use AI to target buyers.</li>
+                </ul>
+            </div>
+            <div class="pillar-image">
+                <img src="https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?auto=format&fit=crop&w=800&q=80" alt="Social Media Content">
+            </div>
+        </div>
+    </section>
+
+    <section class="pillar-section" style="background-color: var(--bg-secondary);">
+        <div class="container grid-2">
+            <div class="pillar-image alt">
+                <img src="https://images.unsplash.com/photo-1586023492125-27b2c045efd7?auto=format&fit=crop&w=800&q=80" alt="Open House">
+            </div>
+            <div class="pillar-content alt">
+                <span class="pillar-number" style="left: auto; right: -20px;">IV</span>
+                <h3>The Live Experience <span class="text-gold">(The Trap)</span></h3>
+                <p>Bridge the digital and physical worlds. We turn boring open houses into interactive data-capture experiences.</p>
+                <ul>
+                    <li>**The Open House Kiosk:** A sleek iPad setup at the door.</li>
+                    <li>**The 30-Second Vibe Quiz:** Buyers scan and tap to find their archetype.</li>
+                    <li>**Instant Intel:** The agent gets a text: "John Doe just walked in. He is a 'Futurist.' Skip the crown molding pitch."</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <section class="pillar-section" id="potential-engine">
+        <div class="container">
+            <div class="text-center" style="margin-bottom: 60px;">
+                <span class="pillar-number" style="position: relative; top: auto; left: auto; font-size: 8rem; display: block;">V</span>
+                <h3>The <span class="text-gold">Potential</span> Engine (AI Staging)</h3>
+                <p class="lead">For developers and flippers: Don't sell an empty box. Sell three different dreams simultaneously. We use AI to generate multiple "Vibe Realities" for a single empty space.</p>
+            </div>
+            
+            <div class="split-view">
+                <div class="split-panel" style="background-image: url('https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80');">
+                    <div class="panel-label">Reality A: The Purist</div>
+                </div>
+                <div class="split-panel" style="background-image: url('https://images.unsplash.com/photo-1554995207-c18c203602cb?auto=format&fit=crop&w=800&q=80'); border-left: 2px solid var(--accent-gold); border-right: 2px solid var(--accent-gold);">
+                    <div class="panel-label">Reality B: The Industrialist</div>
+                </div>
+                <div class="split-panel" style="background-image: url('https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?auto=format&fit=crop&w=800&q=80');">
+                    <div class="panel-label">Reality C: The Nomad</div>
+                </div>
+            </div>
+             <p class="text-center" style="margin-top: 20px; color: var(--text-muted);">*Hover over panels to expand the reality.*</p>
+        </div>
+    </section>
+
+    <section id="cta" class="text-center">
+        <div class="container">
+            <h2>Are You A <span class="text-gold">Realtor</span>, Or Are You An <span class="text-gold">Architect</span>?</h2>
+            <p class="lead" style="color: var(--text-light);">We are selecting 3 Flagship Partners in Austin for Q1 implementation. <br>Transform your portfolio from a commodity into a luxury brand, <span class="text-gold">all without lifting a finger</span>.</p>
+            <button class="btn-gold" style="font-size: 1.2rem; padding: 20px 60px;">Apply for Partnership</button>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <h4>TASTE TO LEAD</h4>
+            <p>Vibe Architecture & AI Profiling for Luxury Real Estate.</p>
+            <p style="margin-top: 20px; color: var(--text-muted); font-size: 0.9rem;">© 2026 Taste to Lead. Austin, Texas. All Rights Reserved.</p>
+        </div>
+    </footer>
+
+</body>
+</html>
+
